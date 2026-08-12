@@ -46,6 +46,64 @@ struct ForumTarget {
     video_type: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IpsForumPage {
+    forum_id: u64,
+    page: u32,
+}
+
+/// Parse the stable numeric forum ID and effective page from an IPS forum URL.
+/// IPS represents page 1 with either the base forum route or an explicit `/page/1/`.
+fn parse_ips_forum_page(url: &str) -> Option<IpsForumPage> {
+    fn parse_route(route: &str) -> Option<IpsForumPage> {
+        let segments: Vec<&str> = route
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let forum_pos = segments
+            .windows(2)
+            .position(|pair| pair == ["forums", "forum"])?;
+        let forum_slug = *segments.get(forum_pos + 2)?;
+        let forum_id = forum_slug.split('-').next()?.parse().ok()?;
+        let page = match &segments[forum_pos + 3..] {
+            [] => 1,
+            ["page", page] => page.parse().ok()?,
+            _ => return None,
+        };
+
+        Some(IpsForumPage { forum_id, page })
+    }
+
+    let parsed = url::Url::parse(url).ok()?;
+    parsed
+        .query()
+        .and_then(|query| query.split('&').next())
+        .filter(|route| route.starts_with('/'))
+        .and_then(parse_route)
+        .or_else(|| parse_route(parsed.path()))
+}
+
+/// Return the lower page reached when an IPS listing request rolls back within
+/// the same numeric forum. Unrelated redirects and page-1 canonicalization are ignored.
+fn pagination_rollback_page(
+    requested_url: &str,
+    final_url: &str,
+    requested_page: u32,
+) -> Option<u32> {
+    if requested_page <= 1 {
+        return None;
+    }
+
+    let requested = parse_ips_forum_page(requested_url)?;
+    if requested.page != requested_page {
+        return None;
+    }
+    let final_page = parse_ips_forum_page(final_url)?;
+
+    (requested.forum_id == final_page.forum_id && final_page.page < requested_page)
+        .then_some(final_page.page)
+}
+
 /// Build `{language}_{video_type}` catalog keys from scraper config (e.g. `tamil_hdrip`).
 fn catalog_id_for_target(language: &str, video_type: &str) -> String {
     format!("{}_{}", language.to_ascii_lowercase(), video_type)
@@ -177,7 +235,7 @@ async fn scrape_tamil_forum(
             let listing_url = format!("{homepage}/index.php?/forums/forum/{forum_id}/page/{page}/");
             rate_limit::wait(&rate_limit::domain_key(homepage), 1).await;
 
-            let html = retry::with_retry(spider_name, || {
+            let listing_result = retry::with_retry(spider_name, || {
                 let url = listing_url.clone();
                 let client = client.clone();
                 let bp = trawl_url.clone();
@@ -185,16 +243,30 @@ async fn scrape_tamil_forum(
                     if let Some(bp_url) = &bp
                         && let Some(r) = fetch_trawl(&client, bp_url, &url).await
                     {
-                        return Ok(r.html);
+                        return Ok(r);
                     }
                     fetch_plain(&client, &url)
                         .await
-                        .map(|r| r.html)
                         .ok_or_else(|| format!("fetch failed: {url}"))
                 }
             })
-            .await
-            .unwrap_or_default();
+            .await;
+
+            let Ok(listing_result) = listing_result else {
+                debug!("{spider_name}: empty listing page {page} for forum {forum_id}");
+                break;
+            };
+
+            if let Some(final_page) =
+                pagination_rollback_page(&listing_url, &listing_result.final_url, page)
+            {
+                info!(
+                    "{spider_name}: forum {forum_id} page {page} rolled back to page {final_page}; stopping this forum"
+                );
+                break;
+            }
+
+            let html = listing_result.html;
 
             if html.is_empty() {
                 debug!("{spider_name}: empty listing page {page} for forum {forum_id}");
@@ -638,7 +710,166 @@ mod tests {
     use crate::jobs::handlers::spiders::spider_args::parse_listing_page_args;
     use serde_json::json;
 
-    use super::{ForumTarget, catalog_id_for_target, collect_forum_targets, should_link_catalog};
+    use super::{
+        ForumTarget, IpsForumPage, catalog_id_for_target, collect_forum_targets,
+        pagination_rollback_page, parse_ips_forum_page, should_link_catalog,
+    };
+
+    #[test]
+    fn parses_ips_forum_identity_and_effective_page() {
+        assert_eq!(
+            parse_ips_forum_page(
+                "https://example.com/forums/forum/49-web-hd-itunes-hd-bluray/"
+            ),
+            Some(IpsForumPage {
+                forum_id: 49,
+                page: 1,
+            })
+        );
+        assert_eq!(
+            parse_ips_forum_page(
+                "https://example.com/index.php?/forums/forum/49-web-hd-itunes-hd-bluray/page/1/"
+            ),
+            Some(IpsForumPage {
+                forum_id: 49,
+                page: 1,
+            })
+        );
+        assert_eq!(
+            parse_ips_forum_page(
+                "https://example.com/index.php?/forums/forum/49-slightly-different-slug/page/10/"
+            ),
+            Some(IpsForumPage {
+                forum_id: 49,
+                page: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn valid_listing_page_is_not_a_rollback() {
+        let requested = "https://example.com/index.php?/forums/forum/49-web-hd/page/2/";
+
+        assert_eq!(pagination_rollback_page(requested, requested, 2), None);
+    }
+
+    #[test]
+    fn same_forum_base_url_is_a_page_one_rollback() {
+        let requested = "https://example.com/index.php?/forums/forum/49-web-hd/page/11/";
+        let final_url = "https://example.com/index.php?/forums/forum/49-web-hd/";
+
+        assert_eq!(pagination_rollback_page(requested, final_url, 11), Some(1));
+    }
+
+    #[test]
+    fn same_forum_lower_explicit_page_is_a_rollback() {
+        let requested = "https://example.com/index.php?/forums/forum/49-web-hd/page/11/";
+        let final_url = "https://example.com/index.php?/forums/forum/49-web-hd/page/10/";
+
+        assert_eq!(pagination_rollback_page(requested, final_url, 11), Some(10));
+    }
+
+    #[test]
+    fn scheme_host_and_port_changes_preserve_the_requested_page() {
+        let requested = "http://old.example:8080/index.php?/forums/forum/49-web-hd/page/11/";
+        let final_url = "https://new.example/index.php?/forums/forum/49-web-hd/page/11/";
+
+        assert_eq!(pagination_rollback_page(requested, final_url, 11), None);
+    }
+
+    #[test]
+    fn slug_and_trailing_slash_changes_preserve_the_requested_page() {
+        let requested = "https://example.com/index.php?/forums/forum/49-old-slug/page/11/";
+        let final_url = "https://example.com/index.php?/forums/forum/49-new-slug/page/11";
+
+        assert_eq!(pagination_rollback_page(requested, final_url, 11), None);
+    }
+
+    #[test]
+    fn unrelated_redirect_is_not_a_pagination_rollback() {
+        let requested = "https://example.com/index.php?/forums/forum/49-web-hd/page/11/";
+
+        assert_eq!(
+            pagination_rollback_page(
+                requested,
+                "https://example.com/login/?return=/forums/forum/49-web-hd/",
+                11,
+            ),
+            None
+        );
+        assert_eq!(
+            pagination_rollback_page(
+                requested,
+                "https://example.com/index.php?/forums/forum/50-other-forum/",
+                11,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn page_one_canonical_redirect_is_not_a_rollback() {
+        let requested = "http://old.example/index.php?/forums/forum/49-old-slug/page/1/";
+        let final_url = "https://new.example/index.php?/forums/forum/49-new-slug/";
+
+        assert_eq!(pagination_rollback_page(requested, final_url, 1), None);
+    }
+
+    #[test]
+    fn rollback_detection_is_shared_by_both_tamil_forums() {
+        let cases = [
+            (
+                "https://www.1tamilmv.pizza/index.php?/forums/forum/49-web-hd/page/11/",
+                "https://www.1tamilmv.pizza/index.php?/forums/forum/49-web-hd/",
+            ),
+            (
+                "https://1tamilblasters.example/index.php?/forums/forum/15-tamil-hdrips/page/11/",
+                "https://1tamilblasters.example/index.php?/forums/forum/15-tamil-hdrips/",
+            ),
+        ];
+
+        for (requested, final_url) in cases {
+            assert_eq!(pagination_rollback_page(requested, final_url, 11), Some(1));
+        }
+    }
+
+    #[test]
+    fn rolling_back_one_forum_still_allows_the_next_forum() {
+        let forums = [
+            (
+                49,
+                vec![
+                    (
+                        2,
+                        "https://example.com/index.php?/forums/forum/49-first/page/2/",
+                    ),
+                    (11, "https://example.com/index.php?/forums/forum/49-first/"),
+                ],
+            ),
+            (
+                15,
+                vec![(
+                    2,
+                    "https://example.com/index.php?/forums/forum/15-second/page/2/",
+                )],
+            ),
+        ];
+        let mut processed = Vec::new();
+
+        for (forum_id, pages) in forums {
+            for (page, final_url) in pages {
+                let requested = format!(
+                    "https://example.com/index.php?/forums/forum/{forum_id}-forum/page/{page}/"
+                );
+                if pagination_rollback_page(&requested, final_url, page).is_some() {
+                    break;
+                }
+                processed.push((forum_id, page));
+            }
+        }
+
+        assert_eq!(processed, vec![(49, 2), (15, 2)]);
+    }
 
     #[test]
     fn listing_pages_default_to_one() {
