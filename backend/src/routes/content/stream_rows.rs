@@ -318,10 +318,14 @@ pub fn my_stream_row_to_json(row: &MyStreamRow, kf: &crate::state::KeywordFilter
         obj.insert("is_active".into(), json!(row.is_active));
         obj.insert("is_public".into(), json!(row.is_public));
         // Runtime-only — no stream.is_keyword_blocked DB column.
-        obj.insert(
-            "is_keyword_blocked".into(),
-            json!(kf.is_stream_text_blocked(&row.name, row.filename.as_deref())),
-        );
+        let keyword_blocked = kf.is_stream_text_blocked(&row.name, row.filename.as_deref());
+        obj.insert("is_keyword_blocked".into(), json!(keyword_blocked));
+        if keyword_blocked {
+            obj.insert(
+                "matched_keywords".into(),
+                json!(kf.matched_stream_keywords(&row.name, row.filename.as_deref())),
+            );
+        }
         obj.insert("media_id".into(), json!(row.media_id));
         obj.insert("media_title".into(), json!(row.media_title));
         obj.insert("media_type".into(), json!(row.media_type));

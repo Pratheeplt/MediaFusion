@@ -1505,6 +1505,7 @@ pub async fn get_media_streams(
                     )
                 };
             let keyword_blocked = kf.is_stream_text_blocked(&r.name, r.filename.as_deref());
+            let matched_keywords = kf.matched_stream_keywords(&r.name, r.filename.as_deref());
 
             // Build playback URL for torrent/usenet/telegram/acestream streams when configured.
             let raw_playback_url: Option<String> = if rd_blocked {
@@ -1613,7 +1614,7 @@ pub async fn get_media_streams(
                 })
             };
 
-            let output = json!({
+            let mut output = json!({
                 "id": r.id,
                 "info_hash": r.info_hash,
                 "yt_id": r.yt_id,
@@ -1656,6 +1657,11 @@ pub async fn get_media_streams(
                 "votes": serde_json::Value::Null,
                 "episode_links": serde_json::Value::Null,
             });
+            if keyword_blocked {
+                if let Some(obj) = output.as_object_mut() {
+                    obj.insert("matched_keywords".into(), json!(matched_keywords));
+                }
+            }
 
             (sort_ctx, output)
         })

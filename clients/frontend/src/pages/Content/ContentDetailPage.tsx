@@ -70,6 +70,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useRpdb } from '@/contexts/RpdbContext'
 import { useToast } from '@/hooks/use-toast'
 import type { StreamingProviderInfo, CatalogStreamInfo } from '@/lib/api'
+import { highlightKeywords, keywordBlockTitle } from '@/lib/highlightKeywords'
 import { adminApi } from '@/lib/api/admin'
 import {
   StreamVoteButtons,
@@ -200,24 +201,6 @@ function canOfferTranscodeForStream(stream: CatalogStreamInfo, streamUrl: string
 
 function buildYouTubeWatchUrl(videoId: string): string {
   return `https://www.youtube.com/watch?v=${videoId}`
-}
-
-function highlightKeywords(text: string, keywords: string[]): React.ReactNode {
-  if (!keywords.length) return text
-  // Build a case-insensitive alternation regex from all keywords, longest first
-  // so "too big" matches before "big" if both were present.
-  const sorted = [...keywords].sort((a, b) => b.length - a.length)
-  const pattern = new RegExp(`(${sorted.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
-  const parts = text.split(pattern)
-  return parts.map((part, i) =>
-    pattern.test(part) ? (
-      <mark key={i} className="bg-orange-400/30 text-orange-300 rounded px-0.5 font-semibold not-italic">
-        {part}
-      </mark>
-    ) : (
-      part
-    ),
-  )
 }
 
 function NsfwStatusSection({
@@ -698,7 +681,11 @@ function StreamActionDialog({
             <div className="space-y-6 py-4 min-w-0">
               {/* Stream Info */}
               <div className="space-y-3">
-                <p className="font-medium text-sm line-clamp-2 break-all">{stream.stream_name || stream.name}</p>
+                <p className="font-medium text-sm line-clamp-2 break-all">
+                  {stream.is_keyword_blocked && stream.matched_keywords?.length
+                    ? highlightKeywords(stream.stream_name || stream.name, stream.matched_keywords)
+                    : stream.stream_name || stream.name}
+                </p>
                 <div className="flex flex-wrap gap-2">
                   {stream.quality && <Badge variant="secondary">{stream.quality}</Badge>}
                   {stream.resolution && <Badge variant="outline">{stream.resolution}</Badge>}
@@ -746,7 +733,7 @@ function StreamActionDialog({
                     <Badge
                       variant="outline"
                       className="border-orange-500/40 text-orange-600 dark:text-orange-400 bg-orange-500/10"
-                      title="Blocked by keyword filter (admin-only visibility)."
+                      title={keywordBlockTitle(stream.matched_keywords)}
                     >
                       Keyword Blocked
                     </Badge>

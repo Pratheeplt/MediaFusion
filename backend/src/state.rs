@@ -56,16 +56,21 @@ impl KeywordFilterCache {
 
     /// Check stream display name and optional filename against stream-scoped keywords.
     pub fn is_stream_text_blocked(&self, name: &str, filename: Option<&str>) -> bool {
-        if self.matches_blocked_keyword(name) {
-            return true;
+        !self.matched_stream_keywords(name, filename).is_empty()
+    }
+
+    /// Returns active stream-scoped keywords that match `name` or `filename`.
+    pub fn matched_stream_keywords(&self, name: &str, filename: Option<&str>) -> Vec<String> {
+        let mut matched = Self::matched_in_list(&self.stream_keywords, &self.whitelist, name);
+        if let Some(file) = filename.filter(|s| !s.is_empty()) {
+            for kw in Self::matched_in_list(&self.stream_keywords, &self.whitelist, file) {
+                if !matched.iter().any(|m| m == &kw) {
+                    matched.push(kw);
+                }
+            }
         }
-        if let Some(file) = filename
-            && !file.is_empty()
-            && self.matches_blocked_keyword(file)
-        {
-            return true;
-        }
-        false
+        matched.sort();
+        matched
     }
 
     /// Returns true when media should be hidden from regular users.
@@ -92,17 +97,28 @@ impl KeywordFilterCache {
     }
 
     fn matches_list(keywords: &[String], whitelist: &[String], text: &str) -> bool {
+        !Self::matched_in_list(keywords, whitelist, text).is_empty()
+    }
+
+    fn matched_in_list(keywords: &[String], whitelist: &[String], text: &str) -> Vec<String> {
         if text.is_empty() || keywords.is_empty() {
-            return false;
+            return Vec::new();
         }
         let lower = text.to_lowercase();
         if whitelist
             .iter()
             .any(|phrase| lower.contains(phrase.as_str()))
         {
-            return false;
+            return Vec::new();
         }
-        keywords.iter().any(|kw| lower.contains(kw.as_str()))
+        let mut matched: Vec<String> = keywords
+            .iter()
+            .filter(|kw| lower.contains(kw.as_str()))
+            .cloned()
+            .collect();
+        matched.sort();
+        matched.dedup();
+        matched
     }
 
     /// Returns a SQL WHERE fragment that excludes media whose `m.title` is keyword-blocked.
@@ -1502,6 +1518,19 @@ mod keyword_filter_tests {
             "clean display name",
             Some("FTVMilfs 25 04 01 Avalon Mira Her Mesmerizing Bounce XXX 2160p MP4"),
         ));
+    }
+
+    #[test]
+    fn matched_stream_keywords_collects_from_name_and_filename() {
+        let kf = test_cache();
+        assert_eq!(
+            kf.matched_stream_keywords("clean name", Some("FTVMilfs XXX release")),
+            vec!["milf".to_string(), "xxx".to_string()]
+        );
+        assert_eq!(
+            kf.matched_stream_keywords("Title with XXX in name", None),
+            vec!["xxx".to_string()]
+        );
     }
 
     #[test]

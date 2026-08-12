@@ -350,14 +350,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pages: write
-      id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      actions: write
 
     steps:
       - name: Checkout
@@ -405,17 +398,6 @@ jobs:
           rsync -a clients/kodi/dist/ pages/
           touch pages/.nojekyll
 
-      - name: Upload Pages artifact
-        if: "!github.event.release.prerelease"
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
-        with:
-          path: pages
-
-      - name: Deploy to GitHub Pages
-        if: "!github.event.release.prerelease"
-        id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
-
       - name: Update gh-pages branch
         if: "!github.event.release.prerelease"
         working-directory: pages
@@ -425,6 +407,15 @@ jobs:
           git add -A
           git diff --staged --quiet || git commit -m "deploy: ${{ github.sha }}"
           git push origin HEAD:gh-pages
+
+      # Release tags cannot deploy to the github-pages environment (branch
+      # protection allows main/gh-pages only). Trigger the docs workflow on
+      # main to publish the updated gh-pages content to the live site.
+      - name: Trigger live Pages deployment
+        if: "!github.event.release.prerelease"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run docs.yml --ref main
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

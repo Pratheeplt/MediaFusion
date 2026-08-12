@@ -207,6 +207,7 @@ export interface StreamInfo {
   is_active?: boolean
   is_public?: boolean
   is_keyword_blocked?: boolean
+  matched_keywords?: string[]
   file_count?: number
 
   // Release flags

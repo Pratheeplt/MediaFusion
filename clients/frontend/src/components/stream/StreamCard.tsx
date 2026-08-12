@@ -23,6 +23,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { useBlockTorrentStream } from '@/hooks/useAdmin'
 import { useBlockMyStream, useCreateStreamSuggestion, useDeleteStream } from '@/hooks'
 import type { CatalogStreamInfo } from '@/lib/api'
+import { highlightKeywords, keywordBlockTitle } from '@/lib/highlightKeywords'
 import { StreamEditSheet } from './StreamEditSheet'
 import { StreamRelinkButton } from './StreamRelinkButton'
 import { StreamCommunityRow } from './StreamCommunityRow'
@@ -466,7 +467,11 @@ export function StreamCard({
       <div className="flex-1 min-w-0 space-y-1 relative z-10">
         {/* Stream name (title) with Last Played badge */}
         <div className="flex items-center gap-2">
-          <p className="font-medium text-sm leading-tight flex-1">{stream.name}</p>
+          <p className="font-medium text-sm leading-tight flex-1">
+            {stream.is_keyword_blocked && stream.matched_keywords?.length
+              ? highlightKeywords(stream.name, stream.matched_keywords)
+              : stream.name}
+          </p>
           {isLastPlayed && (
             <span className="text-[10px] font-medium bg-primary/20 text-primary px-1.5 py-0.5 rounded shrink-0">
               Last Played
@@ -494,7 +499,7 @@ export function StreamCard({
             <Badge
               variant="outline"
               className="shrink-0 text-[10px] px-1.5 py-0 h-5 border-orange-500/40 text-orange-600 dark:text-orange-400 bg-orange-500/10"
-              title="This stream is blocked by a keyword filter and is not visible to regular users."
+              title={keywordBlockTitle(stream.matched_keywords)}
             >
               Keyword Blocked
             </Badge>
@@ -503,7 +508,11 @@ export function StreamCard({
 
         {/* Pre-formatted description from API */}
         {stream.description && (
-          <p className="text-xs text-muted-foreground whitespace-pre-line leading-relaxed">{stream.description}</p>
+          <p className="text-xs text-muted-foreground whitespace-pre-line leading-relaxed">
+            {stream.is_keyword_blocked && stream.matched_keywords?.length
+              ? highlightKeywords(stream.description, stream.matched_keywords)
+              : stream.description}
+          </p>
         )}
         {stream.id && <StreamCommunityRow streamId={stream.id} watchedCount={stream.watched_count} className="pt-1" />}
       </div>
