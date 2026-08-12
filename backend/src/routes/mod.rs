@@ -258,6 +258,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/streaming_provider/debridlink/get-device-code", get(streaming_provider::debridlink_get_device_code))
         .route("/streaming_provider/debridlink/authorize", post(streaming_provider::debridlink_authorize))
         .route("/streaming_provider/premiumize/authorize", get(streaming_provider::premiumize_authorize))
+        .route(
+            "/streaming_provider/premiumize/oauth2_redirect",
+            get(streaming_provider::premiumize_oauth2_redirect),
+        )
         // ── User profiles ─────────────────────────────────────────────────────
         .route(
             "/api/v1/profiles/user-config",

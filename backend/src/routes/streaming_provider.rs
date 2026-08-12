@@ -20,8 +20,14 @@ use fred::prelude::HashesInterface;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use uuid::Uuid;
+
 use crate::{
-    providers::torrents::realdebrid, state::AppState, util::http as http_util, util::retry,
+    crypto,
+    providers::torrents::realdebrid,
+    state::AppState,
+    util::http as http_util,
+    util::retry,
 };
 
 const CACHE_KEY_PREFIX: &str = "debrid_cache:";
@@ -356,12 +362,50 @@ pub struct PremiumizeAuthorizeQuery {
     pub state: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct PremiumizeOAuthRedirectQuery {
+    pub code: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+fn encode_premiumize_oauth_token(access_token: &str) -> String {
+    let payload = serde_json::json!({"access_token": access_token});
+    URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes())
+}
+
+fn premiumize_oauth_redirect_uri(host_url: &str) -> String {
+    format!("{host_url}/streaming_provider/premiumize/oauth2_redirect")
+}
+
+fn premiumize_oauth_error_page(message: &str) -> Response {
+    let escaped = message
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        format!(
+            "<!DOCTYPE html><html><head><title>Premiumize Authorization Failed</title></head>\
+             <body><h1>Premiumize Authorization Failed</h1><p>{escaped}</p>\
+             <p>You can close this tab and try again from Configure.</p></body></html>"
+        ),
+    )
+        .into_response()
+}
+
 /// GET /streaming_provider/premiumize/authorize
 pub async fn premiumize_authorize(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PremiumizeAuthorizeQuery>,
 ) -> Response {
-    let client_id = std::env::var("PREMIUMIZE_OAUTH_CLIENT_ID").unwrap_or_default();
+    let client_id = state
+        .config
+        .premiumize_oauth_client_id
+        .as_deref()
+        .unwrap_or("");
 
     if client_id.is_empty() {
         return (
@@ -371,18 +415,139 @@ pub async fn premiumize_authorize(
             .into_response();
     }
 
-    let host_url = &state.config.host_url;
-    let redirect_uri = format!("{}/streaming_provider/premiumize/oauth2_redirect", host_url);
+    let redirect_uri = premiumize_oauth_redirect_uri(&state.config.host_url);
+    let oauth_state = params
+        .state
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
 
-    let mut url = format!(
-        "https://www.premiumize.me/authorize?client_id={}&response_type=code&redirect_uri={}",
+    let url = format!(
+        "https://www.premiumize.me/authorize?client_id={}&response_type=code&redirect_uri={}&state={}",
         client_id,
         urlencoding::encode(&redirect_uri),
+        urlencoding::encode(&oauth_state),
     );
 
-    if let Some(oauth_state) = params.state {
-        url.push_str(&format!("&state={}", urlencoding::encode(&oauth_state)));
+    Redirect::temporary(&url).into_response()
+}
+
+/// GET /streaming_provider/premiumize/oauth2_redirect
+pub async fn premiumize_oauth2_redirect(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PremiumizeOAuthRedirectQuery>,
+) -> Response {
+    if let Some(error) = params.error.filter(|s| !s.is_empty()) {
+        let description = params
+            .error_description
+            .filter(|s| !s.is_empty())
+            .unwrap_or(error);
+        return premiumize_oauth_error_page(&format!("Premiumize authorization failed: {description}"));
     }
 
-    Redirect::temporary(&url).into_response()
+    let code = match params.code.filter(|s| !s.is_empty()) {
+        Some(code) => code,
+        None => return premiumize_oauth_error_page("Missing authorization code from Premiumize."),
+    };
+
+    let client_id = state
+        .config
+        .premiumize_oauth_client_id
+        .as_deref()
+        .unwrap_or("");
+    let client_secret = state
+        .config
+        .premiumize_oauth_client_secret
+        .as_deref()
+        .unwrap_or("");
+
+    if client_id.is_empty() || client_secret.is_empty() {
+        return premiumize_oauth_error_page(
+            "Premiumize OAuth is not configured on this server. Set PREMIUMIZE_OAUTH_CLIENT_ID and PREMIUMIZE_OAUTH_CLIENT_SECRET.",
+        );
+    }
+
+    let redirect_uri = premiumize_oauth_redirect_uri(&state.config.host_url);
+    let token_resp = match state
+        .http_for_provider("premiumize")
+        .post("https://www.premiumize.me/token")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code.as_str()),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", redirect_uri.as_str()),
+        ])
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("premiumize_oauth2_redirect: token request error: {e}");
+            return premiumize_oauth_error_page("Failed to contact Premiumize. Please try again.");
+        }
+    };
+
+    let token_body: Value = match token_resp.json().await {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::error!("premiumize_oauth2_redirect: token parse error: {e}");
+            return premiumize_oauth_error_page("Invalid response from Premiumize.");
+        }
+    };
+
+    if let Some(oauth_error) = token_body.get("error").and_then(|v| v.as_str()) {
+        let message = match oauth_error {
+            "invalid_grant" => {
+                "That Premiumize login link expired or was already used. Open Configure and connect Premiumize again."
+            }
+            "invalid_client" => {
+                "Premiumize OAuth client credentials are invalid. Check Premiumize OAuth settings on the server."
+            }
+            other => other,
+        };
+        tracing::warn!("premiumize_oauth2_redirect: token exchange failed: {message}");
+        return premiumize_oauth_error_page(message);
+    }
+
+    let access_token = match token_body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(token) => token,
+        None => {
+            tracing::warn!("premiumize_oauth2_redirect: missing access_token in response");
+            return premiumize_oauth_error_page(
+                "Premiumize authorization completed, but no access token was returned.",
+            );
+        }
+    };
+
+    let encoded_token = encode_premiumize_oauth_token(access_token);
+    let user_data_json = serde_json::json!({
+        "sp": {
+            "sv": "premiumize",
+            "tk": encoded_token,
+        }
+    });
+
+    let json_str = match serde_json::to_string(&user_data_json) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("premiumize_oauth2_redirect: user data serialize error: {e}");
+            return premiumize_oauth_error_page("Failed to prepare Premiumize configuration.");
+        }
+    };
+
+    let encrypted = match crypto::encrypt_user_data(&json_str, &state.config.secret_key) {
+        Ok(secret) => secret,
+        Err(e) => {
+            tracing::warn!("premiumize_oauth2_redirect: encrypt_user_data failed: {e}");
+            return premiumize_oauth_error_page(
+                "Premiumize authorization succeeded, but this instance could not store the token in the redirect URL. Try using an API token instead.",
+            );
+        }
+    };
+
+    Redirect::temporary(&format!("/{encrypted}/configure")).into_response()
 }

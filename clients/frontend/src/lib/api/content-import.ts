@@ -873,23 +873,7 @@ export const contentImportApi = {
    * Import AceStream content as a stream
    */
   importAceStream: async (data: AceStreamImportRequest): Promise<ImportResponse> => {
-    const formData = new FormData()
-    formData.append('meta_type', data.meta_type)
-    formData.append('title', data.title)
-    if (data.content_id) formData.append('content_id', data.content_id)
-    if (data.info_hash) formData.append('info_hash', data.info_hash)
-    if (data.meta_id) formData.append('meta_id', data.meta_id)
-    if (data.languages) formData.append('languages', data.languages)
-    if (data.resolution) formData.append('resolution', data.resolution)
-    if (data.quality) formData.append('quality', data.quality)
-    if (data.codec) formData.append('codec', data.codec)
-    if (data.poster) formData.append('poster', data.poster)
-    if (data.background) formData.append('background', data.background)
-    if (data.logo) formData.append('logo', data.logo)
-    if (data.force_import) formData.append('force_import', 'true')
-    if (data.is_anonymous) formData.append('is_anonymous', 'true')
-    if (data.anonymous_display_name) formData.append('anonymous_display_name', data.anonymous_display_name)
-    return apiClient.upload<ImportResponse>('/import/acestream', formData)
+    return apiClient.post<ImportResponse>('/import/acestream', data)
   },
 
   // ============================================
