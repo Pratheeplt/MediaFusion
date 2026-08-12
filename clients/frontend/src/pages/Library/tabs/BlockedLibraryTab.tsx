@@ -45,6 +45,7 @@ const FILTER_LABELS: Record<string, string> = {
   all_restricted: 'All Restricted',
   manual: 'Manually Blocked',
   keyword_blocked: 'Keyword Blocked',
+  keyword_blocked_only: 'Keyword Blocked Only',
   nsfw_flagged: 'NSFW Flagged',
 }
 
@@ -337,6 +338,7 @@ export function BlockedLibraryTab() {
             <SelectItem value="all_restricted">All Restricted</SelectItem>
             <SelectItem value="manual">Manually Blocked</SelectItem>
             <SelectItem value="keyword_blocked">Keyword Blocked</SelectItem>
+            <SelectItem value="keyword_blocked_only">Keyword Blocked Only</SelectItem>
             <SelectItem value="nsfw_flagged">NSFW Flagged</SelectItem>
           </SelectContent>
         </Select>

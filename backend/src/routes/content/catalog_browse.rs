@@ -244,7 +244,9 @@ pub async fn search_catalog(
     let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * page_size;
 
-    let restriction = crate::state::restriction_fragment();
+    let privileged =
+        crate::routes::auth_guard::is_privileged(&headers, &state.config.secret_key_raw);
+    let restriction = crate::state::catalog_restriction_fragment(privileged);
 
     let count_sql = format!(
         "SELECT COUNT(*) FROM media m WHERE (m.title ILIKE $1) AND m.adult = false{restriction}"
@@ -274,7 +276,7 @@ pub async fn search_catalog(
     let kf = state.keyword_filters.read().unwrap().clone();
     let items: Vec<serde_json::Value> = rows
         .into_iter()
-        .filter(|(_, title, _, _)| !kf.matches_blocked_media_text(title, None))
+        .filter(|(_, title, _, _)| privileged || !kf.matches_blocked_media_text(title, None))
         .map(|(id, title, mtype, year)| {
             json!({
                 "id": id,
@@ -348,6 +350,9 @@ pub async fn browse_catalog(
         .into_response();
     }
 
+    let privileged =
+        crate::routes::auth_guard::is_privileged(&headers, &state.config.secret_key_raw);
+
     // Keyword-filter version embeds into cache keys so adding/removing keywords
     // automatically invalidates cached browse pages.
     let kf_ver = state.keyword_filters.read().unwrap().version_tag();
@@ -355,7 +360,7 @@ pub async fn browse_catalog(
     // Full-response cache (2 min TTL) — browse pages rarely change within a session.
     // Embed keyword-filter version so keyword changes invalidate cached pages.
     let browse_cache_key = format!(
-        "catalog:browse:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:kf{}",
+        "catalog:browse:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:kf{}:{}",
         catalog_type,
         params.sort.as_deref().unwrap_or("latest"),
         params.sort_dir.as_deref().unwrap_or("desc"),
@@ -367,6 +372,7 @@ pub async fn browse_catalog(
         params.search.as_deref().unwrap_or(""),
         params.external_id.as_deref().unwrap_or(""),
         kf_ver,
+        if privileged { "priv" } else { "std" },
     );
     if let Some(cached) = cache::get_json(&state.redis, &browse_cache_key).await {
         return Json(cached).into_response();
@@ -414,21 +420,30 @@ pub async fn browse_catalog(
 
     // Use EXISTS subqueries for catalog/genre filtering to avoid DISTINCT + ORDER BY conflicts.
     // $1 is always the catalog media type enum bind.
+    let restriction_sql = if privileged {
+        "NOT (m.is_blocked OR m.poster_nsfw_flagged)".to_string()
+    } else {
+        "NOT (m.is_blocked OR (m.is_keyword_blocked AND NOT m.keyword_block_override) OR m.poster_nsfw_flagged)".to_string()
+    };
     let mut where_parts: Vec<String> = vec![
         "m.type = $1".to_string(),
         "m.adult = false".to_string(),
-        "NOT (m.is_blocked OR (m.is_keyword_blocked AND NOT m.keyword_block_override) OR m.poster_nsfw_flagged)".to_string(),
+        restriction_sql,
     ];
 
-    // Default: only released content (matches Python's include_upcoming=false default)
-    if catalog_type != "tv" {
+    let is_exact_external_lookup = external_id_media.is_some();
+
+    // Default: only released content (matches Python's include_upcoming=false default).
+    // Exact external-ID lookups skip this — callers want that specific row.
+    if catalog_type != "tv" && !is_exact_external_lookup {
         where_parts.push(
             "(m.release_date <= CURRENT_DATE OR m.status = 'released' OR (m.release_date IS NULL AND (m.year IS NULL OR m.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int)))".to_string()
         );
     }
 
-    // Default: only media with available streams (matches Python's has_streams=true default)
-    if params.has_streams.unwrap_or(true) {
+    // Default: only media with available streams (matches Python's has_streams=true default).
+    // Exact external-ID lookups skip this so admins can find keyword-blocked / streamless media.
+    if params.has_streams.unwrap_or(true) && !is_exact_external_lookup {
         where_parts.push("m.total_streams > 0".to_string());
     }
     // bind_idx starts at 1 — $1 is already reserved for catalog_media_type above.
@@ -631,7 +646,7 @@ pub async fn browse_catalog(
     let items: Vec<serde_json::Value> = rows
         .into_iter()
         .filter(|(_, title, _, _, description, _, _, _, _)| {
-            !kf.matches_blocked_media_text(title, description.as_deref())
+            privileged || !kf.matches_blocked_media_text(title, description.as_deref())
         })
         .map(
             |(
@@ -754,14 +769,14 @@ pub async fn get_media_detail(
         .unwrap_or(None)
         .unwrap_or_default();
 
-    // Restriction gate: blocked/keyword-blocked/NSFW media is only visible to admins.
-    let is_admin =
+    // Restriction gate: blocked/keyword-blocked/NSFW media is only visible to admins/moderators.
+    let is_privileged =
         crate::routes::auth_guard::decode_access_token(&headers, &state.config.secret_key_raw)
-            .map(|(_, role)| role == "admin")
+            .map(|(_, role)| crate::routes::auth_guard::is_privileged_role(&role))
             .unwrap_or(false);
     let restricted = {
         let kf = state.keyword_filters.read().unwrap();
-        if is_admin {
+        if is_privileged {
             is_blocked || poster_nsfw_flagged || (is_keyword_blocked && !keyword_block_override)
         } else {
             kf.should_hide_media(
@@ -774,7 +789,7 @@ pub async fn get_media_detail(
             )
         }
     };
-    if restricted && !is_admin {
+    if restricted && !is_privileged {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"detail": "Media not found"})),

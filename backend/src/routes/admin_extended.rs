@@ -374,6 +374,11 @@ pub async fn list_blocked_media(
         "all_restricted" => "(m.is_blocked OR (m.is_keyword_blocked AND NOT m.keyword_block_override) OR m.poster_nsfw_flagged)".to_string(),
         "manual" => "m.is_blocked = true".to_string(),
         "keyword_blocked" => "m.is_keyword_blocked = true AND m.keyword_block_override = false".to_string(),
+        "keyword_blocked_only" => {
+            "m.is_keyword_blocked = true AND m.keyword_block_override = false \
+             AND m.is_blocked = false AND m.poster_nsfw_flagged = false"
+                .to_string()
+        }
         _ => "(m.is_blocked = true OR (m.is_keyword_blocked = true AND m.keyword_block_override = false))".to_string(),
     };
 
@@ -399,7 +404,15 @@ pub async fn list_blocked_media(
         })
         .unwrap_or_default();
 
-    let where_clause = format!("WHERE {base_condition}{type_clause}{search_clause}");
+    // Moderation views surface media with linked streams, except keyword filters
+    // where admins need to find and override blocks even before streams exist.
+    let stream_clause = if matches!(filter, "keyword_blocked" | "keyword_blocked_only") {
+        ""
+    } else {
+        " AND EXISTS (SELECT 1 FROM stream_media_link sml WHERE sml.media_id = m.id)"
+    };
+
+    let where_clause = format!("WHERE {base_condition}{stream_clause}{type_clause}{search_clause}");
 
     // Total count
     let count_sql = format!("SELECT COUNT(*) FROM media m {where_clause}");

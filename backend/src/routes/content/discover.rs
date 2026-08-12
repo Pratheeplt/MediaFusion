@@ -894,6 +894,8 @@ pub async fn discover_search(
     };
 
     let mt = params.media_type.as_str();
+    let privileged =
+        crate::routes::auth_guard::is_privileged(&headers, &state.config.secret_key_raw);
     let kf = { state.keyword_filters.read().unwrap().clone() };
     let items: Vec<Value> = data["results"]
         .as_array()
@@ -910,7 +912,11 @@ pub async fn discover_search(
                 .collect()
         })
         .unwrap_or_default();
-    let items = filter_items_by_keyword(&kf, items);
+    let items = if privileged {
+        items
+    } else {
+        filter_items_by_keyword(&kf, items)
+    };
     let page = data["page"].as_u64().unwrap_or(params.page);
     let total_pages = data["total_pages"].as_u64().unwrap_or(1);
     let total_results = data["total_results"].as_u64().unwrap_or(0);

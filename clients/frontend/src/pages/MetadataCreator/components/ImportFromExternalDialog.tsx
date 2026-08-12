@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -33,6 +34,7 @@ const MEDIA_TYPES = [
 ]
 
 export function ImportFromExternalDialog({ open, onOpenChange, onSuccess }: ImportFromExternalDialogProps) {
+  const navigate = useNavigate()
   const [provider, setProvider] = useState<ImportProvider>('imdb')
   const [externalId, setExternalId] = useState('')
   const [mediaType, setMediaType] = useState<'movie' | 'series' | 'tv'>('movie')
@@ -93,16 +95,18 @@ export function ImportFromExternalDialog({ open, onOpenChange, onSuccess }: Impo
     setError(null)
 
     try {
-      await userMetadataApi.importFromExternal({
+      const imported = await userMetadataApi.importFromExternal({
         provider,
         external_id: externalId.trim(),
         media_type: mediaType,
         is_public: isPublic,
       })
 
+      const catalogType = imported.type === 'series' ? 'series' : imported.type === 'tv' ? 'tv' : 'movie'
+
       toast({
         title: 'Success',
-        description: `"${preview.title}" has been imported`,
+        description: `"${preview.title}" has been imported. Opening media page…`,
       })
 
       // Reset state
@@ -110,6 +114,7 @@ export function ImportFromExternalDialog({ open, onOpenChange, onSuccess }: Impo
       setExternalId('')
       onOpenChange(false)
       onSuccess()
+      navigate(`/dashboard/content/${catalogType}/${imported.id}`)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to import metadata'
       setError(message)
@@ -121,7 +126,7 @@ export function ImportFromExternalDialog({ open, onOpenChange, onSuccess }: Impo
     } finally {
       setIsImporting(false)
     }
-  }, [preview, provider, externalId, mediaType, isPublic, toast, onOpenChange, onSuccess])
+  }, [preview, provider, externalId, mediaType, isPublic, toast, onOpenChange, onSuccess, navigate])
 
   const handleClose = useCallback(() => {
     setPreview(null)

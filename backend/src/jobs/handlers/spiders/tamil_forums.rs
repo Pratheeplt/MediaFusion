@@ -718,9 +718,7 @@ mod tests {
     #[test]
     fn parses_ips_forum_identity_and_effective_page() {
         assert_eq!(
-            parse_ips_forum_page(
-                "https://example.com/forums/forum/49-web-hd-itunes-hd-bluray/"
-            ),
+            parse_ips_forum_page("https://example.com/forums/forum/49-web-hd-itunes-hd-bluray/"),
             Some(IpsForumPage {
                 forum_id: 49,
                 page: 1,

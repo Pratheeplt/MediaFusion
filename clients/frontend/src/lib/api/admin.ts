@@ -122,7 +122,7 @@ export interface BlockedMediaParams {
   search?: string
   page?: number
   page_size?: number
-  /** "blocked" (default) | "nsfw_flagged" | "nsfw_reviewed" */
+  /** "all_restricted" | "manual" | "keyword_blocked" | "keyword_blocked_only" | "nsfw_flagged" | "nsfw_reviewed" */
   filter?: string
 }
 
@@ -632,6 +632,13 @@ export const adminApi = {
     flagged: boolean,
   ): Promise<{ id: number; nsfw_flagged: boolean; nsfw_reviewed: boolean }> => {
     return adminPatch(`/nsfw-flagged/${mediaId}`, { flagged })
+  },
+
+  bulkReviewNsfwItems: async (
+    ids: number[],
+    flagged: boolean,
+  ): Promise<{ count: number; nsfw_flagged: boolean; nsfw_reviewed: boolean }> => {
+    return adminPost('/nsfw-flagged/bulk', { ids, flagged })
   },
 
   triggerNsfwScan: async (

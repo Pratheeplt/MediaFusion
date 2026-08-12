@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, Query, Request, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -164,12 +164,18 @@ struct SearchResultItem {
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+pub struct RefreshMetadataBody {
+    media_type: Option<String>,
+    providers: Option<Vec<String>>,
+}
+
 /// POST /api/v1/metadata/{media_id}/refresh
 pub async fn refresh_metadata(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(media_id): Path<i32>,
-    _req: Request,
+    Json(body): Json<RefreshMetadataBody>,
 ) -> Response {
     let user_id = match validate_token(&headers, &state.config.secret_key_raw) {
         Some(id) => id,
@@ -226,11 +232,19 @@ pub async fn refresh_metadata(
         .find(|(p, _)| p == "imdb")
         .map(|(_, id)| id.clone());
 
-    let meta_type = if db_media_type == "series" {
-        "series"
-    } else {
-        "movie"
-    };
+    let meta_type = body
+        .media_type
+        .as_deref()
+        .filter(|t| *t == "series")
+        .map(|_| "series")
+        .unwrap_or_else(|| {
+            if db_media_type == "series" {
+                "series"
+            } else {
+                "movie"
+            }
+        });
+    let provider_filter = body.providers.as_deref().filter(|p| !p.is_empty());
     let (refreshed_providers, message) = {
         let keys = crate::scrapers::metadata::resolve_metadata_keys(
             &state.pool_ro,
@@ -248,7 +262,7 @@ pub async fn refresh_metadata(
                 state.config.trakt_client_secret.as_deref(),
                 state.config.imdb_cinemeta_fallback_enabled,
             ),
-            None,
+            provider_filter,
         )
         .await
     };
@@ -545,11 +559,9 @@ pub async fn get_media_metadata(
     let is_restricted =
         crate::state::media_is_restricted_with_filters(&state.pool_ro, media_id, Some(&kf)).await;
     if is_restricted {
-        let is_admin =
-            crate::routes::auth_guard::decode_access_token(&headers, &state.config.secret_key_raw)
-                .map(|(_, role)| role == "admin")
-                .unwrap_or(false);
-        if !is_admin {
+        let is_privileged =
+            crate::routes::auth_guard::is_privileged(&headers, &state.config.secret_key_raw);
+        if !is_privileged {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"detail": "Media not found"})),
@@ -794,10 +806,16 @@ pub async fn search_metadata(
 
     // Read keyword filter once (clone out to drop the lock before awaits).
     let kf = { state.keyword_filters.read().unwrap().clone() };
+    let privileged =
+        crate::routes::auth_guard::is_privileged(&headers, &state.config.secret_key_raw);
+    let kf_frag = if privileged {
+        ""
+    } else {
+        kf.keyword_title_block_fragment()
+    };
 
     let (rows, total): (Vec<(i32, String, String, Option<i32>, bool)>, i64) =
         if let Some(ref media_type) = params.media_type {
-            let kf_frag = kf.keyword_title_block_fragment();
             let count_sql = format!(
                 "SELECT COUNT(*) FROM media m \
                  WHERE m.title ILIKE '%' || $1 || '%' \
@@ -856,7 +874,6 @@ pub async fn search_metadata(
 
             (rows, count)
         } else {
-            let kf_frag = kf.keyword_title_block_fragment();
             let count_sql = format!(
                 "SELECT COUNT(*) FROM media m \
                  WHERE m.title ILIKE '%' || $1 || '%'\

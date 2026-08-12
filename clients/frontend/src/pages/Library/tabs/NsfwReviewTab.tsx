@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { adminApi, type BlockedMediaItem } from '@/lib/api/admin'
 import { useToast } from '@/hooks/use-toast'
 import { Poster } from '@/components/ui/poster'
@@ -80,10 +81,14 @@ function NsfwItemCard({
   item,
   isAdmin,
   returnLabel,
+  selected,
+  onSelectedChange,
 }: {
   item: BlockedMediaItem
   isAdmin: boolean
   returnLabel: string
+  selected?: boolean
+  onSelectedChange?: (selected: boolean) => void
 }) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
@@ -145,7 +150,16 @@ function NsfwItemCard({
             )}
           </div>
 
-          <div className="absolute top-2 right-2">
+          <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
+            {isAdmin && onSelectedChange && (
+              <Checkbox
+                checked={selected}
+                onCheckedChange={(checked) => onSelectedChange(Boolean(checked))}
+                onClick={(e) => e.stopPropagation()}
+                aria-label={`Select ${item.title}`}
+                className="bg-background/90 border-border data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+              />
+            )}
             <Badge variant="secondary" className="text-xs">
               {TYPE_LABELS[item.type] ?? item.type}
             </Badge>
@@ -354,12 +368,16 @@ function NsfwScanButton() {
 export function NsfwReviewTab() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [search, setSearch] = useState('')
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const { toast } = useToast()
+  const queryClient = useQueryClient()
 
   const filter = searchParams.get('n_filter') || 'nsfw_flagged'
   const page = Math.max(1, parseInt(searchParams.get('n_page') || '1', 10) || 1)
   const pageSize = parsePageSize(searchParams.get('n_page_size'))
 
   const setFilter = (value: string) => {
+    setSelectedIds([])
     const next = new URLSearchParams(searchParams)
     next.set('n_filter', value)
     next.set('n_page', '1')
@@ -367,6 +385,7 @@ export function NsfwReviewTab() {
   }
 
   const setPage = (value: number) => {
+    setSelectedIds([])
     const next = new URLSearchParams(searchParams)
     if (value > 1) {
       next.set('n_page', String(value))
@@ -377,6 +396,7 @@ export function NsfwReviewTab() {
   }
 
   const setPageSize = (value: PageSize) => {
+    setSelectedIds([])
     const next = new URLSearchParams(searchParams)
     next.set('n_page_size', String(value))
     next.set('n_page', '1')
@@ -399,6 +419,41 @@ export function NsfwReviewTab() {
   const isAdmin = data?.viewer_is_admin ?? false
   const returnLabel = filter === 'nsfw_reviewed' ? 'NSFW Review (Reviewed)' : 'NSFW Review'
   const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1
+  const pageItemIds = data?.items.map((item) => item.id) ?? []
+  const allPageSelected = pageItemIds.length > 0 && pageItemIds.every((id) => selectedIds.includes(id))
+  const somePageSelected = pageItemIds.some((id) => selectedIds.includes(id))
+
+  const bulkReviewMutation = useMutation({
+    mutationFn: ({ ids, flagged }: { ids: number[]; flagged: boolean }) => adminApi.bulkReviewNsfwItems(ids, flagged),
+    onSuccess: (result, { flagged }) => {
+      toast({
+        title: flagged ? 'Marked as NSFW' : 'Marked as safe',
+        description: `${result.count} item${result.count !== 1 ? 's' : ''} updated.`,
+      })
+      setSelectedIds([])
+      queryClient.invalidateQueries({ queryKey: ['media', 'nsfw'] })
+    },
+    onError: (error: Error) => {
+      toast({ variant: 'destructive', title: 'Bulk review failed', description: error.message })
+    },
+  })
+
+  const toggleItemSelected = (id: number, selected: boolean) => {
+    setSelectedIds((prev) => (selected ? [...new Set([...prev, id])] : prev.filter((itemId) => itemId !== id)))
+  }
+
+  const toggleSelectAllOnPage = () => {
+    if (allPageSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !pageItemIds.includes(id)))
+    } else {
+      setSelectedIds((prev) => [...new Set([...prev, ...pageItemIds])])
+    }
+  }
+
+  const handleBulkReview = (flagged: boolean) => {
+    if (selectedIds.length === 0) return
+    bulkReviewMutation.mutate({ ids: selectedIds, flagged })
+  }
 
   const handlePageChange = (nextPage: number) => {
     setPage(nextPage)
@@ -442,6 +497,7 @@ export function NsfwReviewTab() {
             placeholder="Search flagged items..."
             value={search}
             onChange={(e) => {
+              setSelectedIds([])
               setSearch(e.target.value)
               setPage(1)
             }}
@@ -459,6 +515,63 @@ export function NsfwReviewTab() {
           </SelectContent>
         </Select>
       </div>
+
+      {isAdmin && data && data.items.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 p-3 rounded-xl border border-border/60 bg-muted/20">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <Checkbox
+              checked={allPageSelected ? true : somePageSelected ? 'indeterminate' : false}
+              onCheckedChange={toggleSelectAllOnPage}
+              aria-label="Select all items on this page"
+            />
+            <span>
+              {selectedIds.length > 0 ? `${selectedIds.length} selected` : `Select all on page (${data.items.length})`}
+            </span>
+          </label>
+
+          {selectedIds.length > 0 && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs gap-1 border-destructive/30 text-destructive hover:bg-destructive/10"
+                disabled={bulkReviewMutation.isPending}
+                onClick={() => handleBulkReview(true)}
+              >
+                {bulkReviewMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <XCircle className="h-3 w-3" />
+                )}
+                Mark NSFW ({selectedIds.length})
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs gap-1 border-emerald-500/30 text-emerald-500 hover:bg-emerald-500/10"
+                disabled={bulkReviewMutation.isPending}
+                onClick={() => handleBulkReview(false)}
+              >
+                {bulkReviewMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <CheckCircle className="h-3 w-3" />
+                )}
+                Mark Safe ({selectedIds.length})
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-8 text-xs"
+                disabled={bulkReviewMutation.isPending}
+                onClick={() => setSelectedIds([])}
+              >
+                Clear
+              </Button>
+            </>
+          )}
+        </div>
+      )}
 
       {data && data.total > 0 && (
         <ListPagination
@@ -496,7 +609,14 @@ export function NsfwReviewTab() {
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
             {data.items.map((item) => (
-              <NsfwItemCard key={item.id} item={item} isAdmin={isAdmin} returnLabel={returnLabel} />
+              <NsfwItemCard
+                key={item.id}
+                item={item}
+                isAdmin={isAdmin}
+                returnLabel={returnLabel}
+                selected={selectedIds.includes(item.id)}
+                onSelectedChange={isAdmin ? (selected) => toggleItemSelected(item.id, selected) : undefined}
+              />
             ))}
           </div>
 

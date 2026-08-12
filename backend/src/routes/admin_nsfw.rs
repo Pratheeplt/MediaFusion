@@ -79,6 +79,54 @@ pub struct ReviewRequest {
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+pub struct BulkReviewRequest {
+    pub ids: Vec<i32>,
+    /// true = confirm NSFW; false = clear false positive
+    pub flagged: bool,
+}
+
+/// POST /api/v1/admin/nsfw-flagged/bulk
+pub async fn bulk_review_nsfw_items(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BulkReviewRequest>,
+) -> impl IntoResponse {
+    if !validate_admin(&headers, &state.config.secret_key_raw) {
+        return forbidden();
+    }
+    if body.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "ids must not be empty"})),
+        )
+            .into_response();
+    }
+
+    match sqlx::query(
+        "UPDATE media
+         SET poster_nsfw_reviewed = true,
+             poster_nsfw_flagged  = $1
+         WHERE id = ANY($2)",
+    )
+    .bind(body.flagged)
+    .bind(&body.ids)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(r) => Json(json!({
+            "count": r.rows_affected(),
+            "nsfw_flagged": body.flagged,
+            "nsfw_reviewed": true,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::error!("bulk_review_nsfw_items: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 /// PATCH /api/v1/admin/nsfw-flagged/{id}
 /// Admin-only. Sets `poster_nsfw_reviewed=true` and `poster_nsfw_flagged` to the
 /// requested value.

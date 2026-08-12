@@ -76,6 +76,17 @@ pub fn decode_access_token(
     Ok((user_id, role))
 }
 
+/// Admin or moderator — can see keyword-blocked media for review/override.
+pub fn is_privileged_role(role: &str) -> bool {
+    matches!(role, "admin" | "moderator")
+}
+
+pub fn is_privileged(headers: &HeaderMap, secret_key: &str) -> bool {
+    decode_access_token(headers, secret_key)
+        .map(|(_, role)| is_privileged_role(&role))
+        .unwrap_or(false)
+}
+
 async fn user_is_active(pool: &PgPool, user_id: i32) -> Result<bool, AuthFailure> {
     let active: Option<bool> = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1")
         .bind(user_id)

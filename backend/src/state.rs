@@ -187,10 +187,19 @@ impl KeywordFilterCache {
 ///
 /// Always active — does not depend on any runtime config.  Use this on every
 /// catalog / search / meta query that should hide restricted content from
-/// regular users.  The three exempt admin endpoints check `media_is_restricted`
-/// separately and bypass this fragment for admin-role callers.
+/// regular users.  Privileged callers use [`catalog_restriction_fragment`] instead
+/// so keyword-blocked rows remain discoverable for review.
 pub fn restriction_fragment() -> &'static str {
     " AND NOT (m.is_blocked OR (m.is_keyword_blocked AND NOT m.keyword_block_override) OR m.poster_nsfw_flagged)"
+}
+
+/// Catalog browse/search restriction. Privileged users still see keyword-blocked media.
+pub fn catalog_restriction_fragment(privileged: bool) -> &'static str {
+    if privileged {
+        " AND NOT (m.is_blocked OR m.poster_nsfw_flagged)"
+    } else {
+        restriction_fragment()
+    }
 }
 
 /// Returns `true` when the given media row is restricted (manually blocked,
