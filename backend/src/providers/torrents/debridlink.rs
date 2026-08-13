@@ -97,6 +97,13 @@ fn map_dl_error(code: &str) -> Option<(&'static str, &'static str)> {
             "daily_download_limit.mp4",
         ),
         "floodDetected" => ("Flood detected", "too_many_requests.mp4"),
+        "badTorrentFile" | "badTorrent" | "invalidTorrent" => {
+            ("Invalid or unsupported torrent file", "transfer_error.mp4")
+        }
+        "disabledServerHost" => (
+            "Debrid-Link server or VPN are not allowed on this host",
+            "ip_not_allowed.mp4",
+        ),
         _ => return None,
     })
 }
@@ -781,4 +788,24 @@ pub async fn check_cached(http: &reqwest::Client, token: &str, hashes: &[String]
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_dl_error;
+    use crate::providers::ProviderError;
+    use serde_json::json;
+
+    #[test]
+    fn bad_torrent_file_maps_to_transfer_error() {
+        let body = json!({"success": false, "error": "badTorrentFile"});
+        let err = check_dl_error(&body).unwrap_err();
+        match err {
+            ProviderError::Api { video_file, .. } => {
+                assert_eq!(video_file, "transfer_error.mp4");
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+        assert!(!err.is_unexpected());
+    }
 }

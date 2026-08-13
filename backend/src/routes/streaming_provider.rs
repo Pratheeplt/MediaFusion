@@ -23,11 +23,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    crypto,
-    providers::torrents::realdebrid,
-    state::AppState,
-    util::http as http_util,
-    util::retry,
+    crypto, providers::torrents::realdebrid, state::AppState, util::http as http_util, util::retry,
 };
 
 const CACHE_KEY_PREFIX: &str = "debrid_cache:";
@@ -441,7 +437,9 @@ pub async fn premiumize_oauth2_redirect(
             .error_description
             .filter(|s| !s.is_empty())
             .unwrap_or(error);
-        return premiumize_oauth_error_page(&format!("Premiumize authorization failed: {description}"));
+        return premiumize_oauth_error_page(&format!(
+            "Premiumize authorization failed: {description}"
+        ));
     }
 
     let code = match params.code.filter(|s| !s.is_empty()) {

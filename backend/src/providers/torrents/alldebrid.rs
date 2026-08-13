@@ -25,6 +25,7 @@ fn map_ad_error(code: &str) -> Option<(&'static str, &'static str)> {
         "MAGNET_MUST_BE_PREMIUM" | "MUST_BE_PREMIUM" | "LINK_MUST_BE_PREMIUM" => {
             ("Premium AllDebrid account required", "need_premium.mp4")
         }
+        "FREE_TRIAL_LIMIT_REACHED" => ("AllDebrid free trial limit reached", "need_premium.mp4"),
         "MAGNET_TOO_MANY_ACTIVE" | "MAGNET_TOO_MANY" => {
             ("Too many active torrents on AllDebrid", "torrent_limit.mp4")
         }
@@ -798,4 +799,30 @@ pub async fn check_cached(http: &reqwest::Client, token: &str, hashes: &[String]
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_ad_error;
+    use crate::providers::ProviderError;
+    use serde_json::json;
+
+    #[test]
+    fn free_trial_limit_reached_maps_to_need_premium() {
+        let body = json!({
+            "status": "error",
+            "error": {
+                "code": "FREE_TRIAL_LIMIT_REACHED",
+                "message": "You have reached the free trial limit (7 days // 25GB downloaded or host uneligible for free trial)",
+            }
+        });
+        let err = check_ad_error(&body).unwrap_err();
+        match err {
+            ProviderError::Api { video_file, .. } => {
+                assert_eq!(video_file, "need_premium.mp4");
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+        assert!(!err.is_unexpected());
+    }
 }
