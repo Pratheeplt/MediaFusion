@@ -1672,10 +1672,10 @@ pub async fn get_media_streams(
                 "votes": serde_json::Value::Null,
                 "episode_links": serde_json::Value::Null,
             });
-            if keyword_blocked {
-                if let Some(obj) = output.as_object_mut() {
-                    obj.insert("matched_keywords".into(), json!(matched_keywords));
-                }
+            if keyword_blocked
+                && let Some(obj) = output.as_object_mut()
+            {
+                obj.insert("matched_keywords".into(), json!(matched_keywords));
             }
 
             (sort_ctx, output)
