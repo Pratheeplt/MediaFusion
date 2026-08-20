@@ -1523,9 +1523,7 @@ pub async fn get_media_streams(
             let matched_keywords = kf.matched_stream_keywords(&r.name, r.filename.as_deref());
 
             // Build playback URL for torrent/usenet/telegram/acestream streams when configured.
-            let raw_playback_url: Option<String> = if rd_blocked {
-                None
-            } else if r.stream_type == StreamType::Acestream {
+            let raw_playback_url: Option<String> = if r.stream_type == StreamType::Acestream {
                 if ud.enable_acestream_streams {
                     mediaflow_config.and_then(|mf| {
                         mediaflow::encode_mediaflow_acestream_url(

@@ -899,8 +899,8 @@ function StreamActionDialog({
                   <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm">
                     <p className="text-amber-600 dark:text-amber-400 font-medium mb-1">RealDebrid blocked</p>
                     <p className="text-muted-foreground text-xs">
-                      This release uses a filename pattern RealDebrid rejects (e.g. WEBRip, WEB-DL). It is hidden from
-                      Stremio but playable here — switch to another debrid provider if RealDebrid fails at resolve time.
+                      RealDebrid rejects this filename pattern (e.g. WEBRip, WEB-DL), so it is hidden from Stremio. You
+                      can still attempt playback here, or switch to another debrid provider above.
                     </p>
                   </div>
                 )}
@@ -1161,8 +1161,8 @@ function StreamActionDialog({
                 <p>
                   {stream.rd_blocked
                     ? streamUrl
-                      ? 'Hidden from Stremio due to RealDebrid filename rules. You can still play here — use another debrid provider if RealDebrid fails.'
-                      : 'Hidden from Stremio due to RealDebrid filename rules. Configure a debrid provider to attempt playback.'
+                      ? 'Hidden from Stremio because RealDebrid rejects this filename pattern. You can attempt playback here or switch debrid provider above.'
+                      : 'Hidden from Stremio because RealDebrid rejects this filename pattern. Configure a debrid provider to play from the web UI.'
                     : streamUrl && (isDebridProvider || isDirectProxyStream || isYoutubeStream)
                       ? hasMediaflowProxy || isDirectProxyStream || isYoutubeStream
                         ? isYoutubeStream

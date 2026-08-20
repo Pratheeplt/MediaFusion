@@ -300,7 +300,16 @@ async fn resolve(
     };
 
     // 3. Restriction check: block playback if all media linked to this torrent is restricted.
-    if crate::state::info_hash_is_restricted(&state.pool_ro, info_hash).await {
+    // Admins/moderators may still play for review (matches catalog stream visibility rules).
+    let bypass_restriction = if let Some(uid) = user_data.user_id {
+        db::get_user_role(&state.pool_ro, uid.0)
+            .await
+            .is_some_and(db::is_mod_or_admin)
+    } else {
+        false
+    };
+    if !bypass_restriction && crate::state::info_hash_is_restricted(&state.pool_ro, info_hash).await
+    {
         return Err(providers::ProviderError::api(
             "Content is restricted",
             "restricted.mp4",
