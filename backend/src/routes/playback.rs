@@ -308,7 +308,14 @@ async fn resolve(
     }
 
     // 4. Check Redis cache, then deduplicate concurrent resolution.
-    let cache_key = playback_cache_key(secret_str, info_hash, season, episode);
+    let cache_key = playback_cache_key(
+        secret_str,
+        provider_name,
+        info_hash,
+        season,
+        episode,
+        filename,
+    );
     if let Some(cached) =
         try_cached_playback_url(&state, &cache_key, info_hash, season, episode).await
     {
@@ -935,15 +942,38 @@ async fn pikpak_save_token(
 
 fn playback_cache_key(
     secret_str: &str,
+    provider_name: &str,
     info_hash: &str,
     season: Option<i32>,
     episode: Option<i32>,
+    filename: Option<&str>,
 ) -> String {
-    let raw = format!("{secret_str}_{info_hash}_{season:?}_{episode:?}");
+    let raw =
+        format!("{secret_str}_{provider_name}_{info_hash}_{season:?}_{episode:?}_{filename:?}");
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     let hash = hex_encode(&hasher.finalize());
     format!("playback_url:{hash}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::playback_cache_key;
+
+    #[test]
+    fn playback_cache_key_varies_by_provider() {
+        let base = playback_cache_key("U-abc", "realdebrid", "deadbeef", None, None, None);
+        let torbox = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
+        assert_ne!(base, torbox);
+    }
+
+    #[test]
+    fn playback_cache_key_varies_by_filename() {
+        let no_name = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
+        let named =
+            playback_cache_key("U-abc", "torbox", "deadbeef", None, None, Some("movie.mkv"));
+        assert_ne!(no_name, named);
+    }
 }
 
 async fn try_cached_playback_url(
