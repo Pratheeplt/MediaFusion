@@ -1683,25 +1683,44 @@ pub async fn get_media_streams(
     // Filter by what the selected provider can actually handle.
     // Rules:
     //   torrent  → only if provider is torrent-capable or p2p (no provider)
-    //   usenet   → only if provider is usenet-capable
+    //   usenet   → only if provider is usenet-capable AND the row's exclusive
+    //              source (Easynews / TorBox Search) belongs to that provider
     //   other    → always shown (http, telegram, youtube, acestream, etc.)
     let svc = selected_provider.as_deref().unwrap_or("p2p");
     let can_torrent = svc == "p2p" || crate::routes::stream::TORRENT_CAPABLE.contains(&svc);
     let can_usenet = crate::routes::stream::USENET_CAPABLE.contains(&svc);
+    let allow_public_usenet = state.config.is_scrap_from_public_usenet_indexers;
+    // torbox is both torrent- and usenet-capable, so the coarse can_torrent/can_usenet
+    // gate alone cannot be skipped — a usenet row must still pass the per-source
+    // exclusivity check (e.g. an Easynews-sourced row must never leak into a torbox
+    // or any other provider's results, and vice versa for TorBox Search).
+    let usenet_provider = ud
+        .streaming_providers
+        .iter()
+        .find(|sp| sp.service.eq_ignore_ascii_case(svc));
 
-    if !can_torrent || !can_usenet {
-        stream_pairs.retain(|(_, out)| {
-            match out
-                .get("stream_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-            {
-                "torrent" => can_torrent,
-                "usenet" => can_usenet,
-                _ => true,
+    stream_pairs.retain(|(_, out)| {
+        match out
+            .get("stream_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+        {
+            "torrent" => can_torrent,
+            "usenet" => {
+                can_usenet
+                    && match usenet_provider {
+                        Some(provider) => crate::usenet_compat::is_usenet_stream_compatible(
+                            out,
+                            provider,
+                            &ud,
+                            allow_public_usenet,
+                        ),
+                        None => true,
+                    }
             }
-        });
-    }
+            _ => true,
+        }
+    });
 
     // Keep provider-compatible outputs for stream_id deep-link pinning.
     let provider_compatible_outputs: std::collections::HashMap<i32, serde_json::Value> =

@@ -1,0 +1,2 @@
+-- No-op: the original embedded credentials are not recoverable and should
+-- not be restored (the whole point of the up migration is to remove them).

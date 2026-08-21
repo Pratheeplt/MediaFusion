@@ -258,7 +258,7 @@ async fn handle_provider(
     };
 
     // 3. Redis cache check, then deduplicate concurrent HEAD/GET resolution.
-    let ck = cache::cache_key(secret_str, nzb_guid, season, episode);
+    let ck = cache::cache_key(secret_str, provider_name, nzb_guid, season, episode);
     if let Some(cached) = cache::get(&state.redis, &ck).await {
         return playback_redirect(method, cached);
     }
@@ -285,7 +285,15 @@ async fn handle_provider(
     // Build a MediaFusion-proxied submission URL so raw indexer credentials
     // are never sent to third-party providers.  Falls back to direct file-upload
     // when host_url is localhost (the proxy URL would be unreachable externally).
-    let submission_url = if is_localhost_url(&state.config.host_url) {
+    //
+    // Easynews never consumes this: its playback re-searches the Easynews catalog
+    // by title using the requesting user's own Easynews login (see `dispatch`'s
+    // "easynews" branch / `easynews_credentials`) — it never submits or fetches an
+    // NZB file, so there is nothing for `/usenet/nzb/{nzb_guid}` to serve it. Skip
+    // building it to avoid logging a dead URL that looks like a playback link.
+    let submission_url = if provider_name.eq_ignore_ascii_case("easynews")
+        || is_localhost_url(&state.config.host_url)
+    {
         String::new()
     } else {
         format!(
@@ -298,9 +306,9 @@ async fn handle_provider(
     tracing::debug!(
         provider = provider_name,
         nzb_guid,
-        raw_url = stream.nzb_url.as_str(),
+        resolved_host = nzb_url::host(&fallback_url).as_str(),
         has_apikey = fallback_url.contains("apikey="),
-        proxy_url = submission_url.as_str(),
+        nzb_submission_proxy_url = submission_url.as_str(),
         source = ?stream.source,
         indexer = ?stream.indexer,
         "usenet playback: NZB URL resolved"

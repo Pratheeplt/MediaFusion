@@ -1,6 +1,8 @@
 use sqlx::PgPool;
 use tracing::debug;
 
+use crate::providers::usenet::nzb_url::sanitize_nzb_url;
+
 use super::stream_links::{link_stream_to_media, link_stream_to_media_with_flags};
 use super::stream_model::{
     AcestreamStoreInput, HttpStoreInput, StoreStreamOpts, StreamFileStoreInput, StreamStoreBase,
@@ -196,6 +198,12 @@ pub async fn store_usenet_stream(
     let base = sanitize_base(&stream.base);
     let stream_id = insert_base_stream(pool, &base, StreamType::Usenet).await?;
 
+    // Strip any embedded basic-auth credentials or sensitive query params (e.g.
+    // Easynews `user:pass@host`, Newznab `apikey=`) before the URL is ever
+    // persisted — the current requesting user's own credentials are injected
+    // fresh at playback time via `nzb_url::build_user_scoped_nzb_url`.
+    let sanitized_nzb_url = sanitize_nzb_url(&stream.nzb_url).unwrap_or_default();
+
     let us_result = sqlx::query(
         r#"
         INSERT INTO usenet_stream (
@@ -208,7 +216,7 @@ pub async fn store_usenet_stream(
     )
     .bind(stream_id.0)
     .bind(&stream.nzb_guid)
-    .bind(strip_nul(&stream.nzb_url))
+    .bind(strip_nul(&sanitized_nzb_url))
     .bind(stream.size)
     .bind(strip_nul(&stream.indexer))
     .bind(
