@@ -53,6 +53,7 @@ async function checkStreamability(url: string): Promise<{
   streamable: boolean
   contentType?: string
   error?: string
+  playbackError?: boolean
 }> {
   try {
     // Skip check for blob URLs or data URLs
@@ -74,6 +75,22 @@ async function checkStreamability(url: string): Promise<{
     clearTimeout(timeoutId)
 
     const contentType = response.headers.get('content-type')?.toLowerCase() || ''
+    const finalPath = (() => {
+      try {
+        return new URL(response.url).pathname
+      } catch {
+        return ''
+      }
+    })()
+
+    if (finalPath.startsWith('/static/exceptions/')) {
+      return {
+        streamable: false,
+        contentType,
+        playbackError: true,
+        error: 'The streaming provider could not resolve a playable video for this stream',
+      }
+    }
 
     // Check for download content types
     if (DOWNLOAD_CONTENT_TYPES.some((type) => contentType.includes(type))) {
@@ -109,6 +126,8 @@ export interface VideoPlayerProps {
   onError?: (error: string) => void
   onAudioIssue?: () => void // Called when audio appears to not be playing (unsupported codec)
   className?: string
+  /** Raw MediaFusion playback URL used to detect redirects to exception videos. */
+  streamCheckUrl?: string
   /** If true, skip streamability check (for known streamable URLs) */
   skipStreamCheck?: boolean
 }
@@ -152,6 +171,7 @@ export function VideoPlayer({
   onError,
   onAudioIssue,
   className,
+  streamCheckUrl,
   skipStreamCheck = false,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -168,6 +188,7 @@ export function VideoPlayer({
   const [showControls, setShowControls] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isDownloadOnly, setIsDownloadOnly] = useState(false)
+  const [isPlaybackError, setIsPlaybackError] = useState(false)
   const [checkingStream, setCheckingStream] = useState(true)
   const [copiedLink, setCopiedLink] = useState(false)
   const [audioIssueDetected, setAudioIssueDetected] = useState(false)
@@ -181,20 +202,23 @@ export function VideoPlayer({
     if (!currentSource?.src || skipStreamCheck) {
       setCheckingStream(false)
       setIsDownloadOnly(false)
+      setIsPlaybackError(false)
       return
     }
 
     let cancelled = false
     setCheckingStream(true)
     setIsDownloadOnly(false)
+    setIsPlaybackError(false)
     setError(null)
 
-    checkStreamability(currentSource.src).then((result) => {
+    checkStreamability(streamCheckUrl || currentSource.src).then((result) => {
       if (cancelled) return
       setCheckingStream(false)
 
       if (!result.streamable) {
-        setIsDownloadOnly(true)
+        setIsPlaybackError(result.playbackError === true)
+        setIsDownloadOnly(result.playbackError !== true)
         setIsLoading(false)
         setError(result.error || 'This URL cannot be streamed directly')
         onError?.(result.error || 'Download-only URL')
@@ -204,7 +228,7 @@ export function VideoPlayer({
     return () => {
       cancelled = true
     }
-  }, [currentSource?.src, skipStreamCheck, onError])
+  }, [currentSource?.src, streamCheckUrl, skipStreamCheck, onError])
 
   // Determine if the current source is HLS
   const isHlsSource = useCallback(
@@ -222,7 +246,7 @@ export function VideoPlayer({
   useEffect(() => {
     const video = videoRef.current
     const src = currentSource?.src
-    if (!video || !src || isDownloadOnly || checkingStream) return
+    if (!video || !src || isDownloadOnly || isPlaybackError || checkingStream) return
 
     // Destroy previous HLS instance
     if (hlsRef.current) {
@@ -326,7 +350,7 @@ export function VideoPlayer({
       video.removeAttribute('src')
       video.load()
     }
-  }, [currentSource?.src, isDownloadOnly, checkingStream, isHlsSource, autoPlay, onError])
+  }, [currentSource?.src, isDownloadOnly, isPlaybackError, checkingStream, isHlsSource, autoPlay, onError])
 
   // Handle video events
   useEffect(() => {
@@ -434,6 +458,23 @@ export function VideoPlayer({
       }
     }
   }, [onTimeUpdate, onEnded, onError, onAudioIssue, startTime, audioIssueDetected, isPlaying, currentSource?.src])
+
+  // Watch history is created only after playback begins, so the resume position
+  // can arrive just after metadata has loaded. Apply it while playback is still
+  // at the beginning without seeking an already-watching user backwards.
+  useEffect(() => {
+    const video = videoRef.current
+    if (
+      !video ||
+      startTime <= 0 ||
+      video.currentTime >= 2 ||
+      !Number.isFinite(video.duration) ||
+      startTime >= video.duration
+    ) {
+      return
+    }
+    video.currentTime = startTime
+  }, [startTime, currentSource?.src])
 
   // Cleanup video element on unmount to stop buffering
   useEffect(() => {
@@ -563,6 +604,7 @@ export function VideoPlayer({
     setError(null)
     setIsLoading(true)
     setIsDownloadOnly(false)
+    setIsPlaybackError(false)
     setCheckingStream(true)
 
     // After source change, resume from same position (if video is available)
@@ -713,7 +755,7 @@ export function VideoPlayer({
       )}
 
       {/* Controls - hide when download-only or checking */}
-      {!isDownloadOnly && !checkingStream && (
+      {!isDownloadOnly && !checkingStream && !error && (
         <div
           className={cn(
             'absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent pt-3 sm:pt-4 transition-opacity duration-300',

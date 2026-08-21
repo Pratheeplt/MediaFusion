@@ -330,6 +330,7 @@ export function PlayerDialog({
             poster={poster}
             autoPlay
             startTime={startTime}
+            streamCheckUrl={externalStreamUrl || stream.url}
             onTimeUpdate={onTimeUpdate}
             onEnded={onEnded}
             onAudioIssue={handleAudioIssue}

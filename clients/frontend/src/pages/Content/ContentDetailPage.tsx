@@ -525,39 +525,6 @@ function StreamActionDialog({
   const canShowTranscodeOption = Boolean(stream && streamUrl && canOfferTranscodeForStream(stream, streamUrl))
   const transcodeStreamUrl = canShowTranscodeOption && streamUrl ? buildTranscodeStreamUrl(streamUrl) : null
 
-  const handleAction = async (action: 'download' | 'queue' | 'copy') => {
-    if (!stream) return
-
-    // Track the action (skip copy - not worth tracking)
-    if (action !== 'copy') {
-      await trackAction.mutateAsync({
-        media_id: mediaId,
-        title,
-        catalog_type: catalogType,
-        season,
-        episode,
-        action,
-        stream_info: {
-          id: stream.id,
-          info_hash: stream.info_hash,
-          name: stream.name,
-          quality: stream.quality,
-          size: stream.size,
-          source: stream.source,
-        },
-      })
-    }
-
-    if (action === 'copy' && rawStreamUrl) {
-      await navigator.clipboard.writeText(rawStreamUrl)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } else if (action === 'download' && rawStreamUrl) {
-      window.open(rawStreamUrl, '_blank')
-      onOpenChange(false)
-    }
-  }
-
   const handleWatch = (useTranscode = false) => {
     if (stream && streamUrl && onWatch) {
       onOpenChange(false) // Close stream action dialog
@@ -566,10 +533,27 @@ function StreamActionDialog({
   }
 
   const handleDownload = () => {
-    if (rawStreamUrl) {
-      window.open(rawStreamUrl, '_blank')
-      handleAction('download')
-    }
+    if (!stream || !rawStreamUrl) return
+
+    // Open exactly once while the browser still considers this a user gesture.
+    window.open(rawStreamUrl, '_blank')
+    onOpenChange(false)
+    trackAction.mutate({
+      media_id: mediaId,
+      title,
+      catalog_type: catalogType,
+      season,
+      episode,
+      action: 'download',
+      stream_info: {
+        id: stream.id,
+        info_hash: stream.info_hash,
+        name: stream.name,
+        quality: stream.quality,
+        size: stream.size,
+        source: stream.source,
+      },
+    })
   }
 
   // File annotation handlers (for series episode link correction)
@@ -1324,6 +1308,7 @@ export function ContentDetailPage() {
   const [watchHistoryId, setWatchHistoryId] = useState<number | null>(null)
   const [startTime, setStartTime] = useState(0)
   const lastProgressUpdateRef = useRef<number>(0) // Track last update time for throttling
+  const watchTrackingStartedRef = useRef(false)
   const trackAction = useTrackStreamAction()
   const updateProgress = useUpdateWatchProgress()
 
@@ -1795,7 +1780,7 @@ export function ContentDetailPage() {
 
   // Handle watch action - opens player at page level (outside of StreamActionDialog)
   const handleWatchStream = useCallback(
-    async (stream: CatalogStreamInfo, streamUrl: string, options?: { useTranscode?: boolean; rawUrl?: string }) => {
+    (stream: CatalogStreamInfo, streamUrl: string, options?: { useTranscode?: boolean; rawUrl?: string }) => {
       const transcodeUrl = canOfferTranscodeForStream(stream, streamUrl) ? buildTranscodeStreamUrl(streamUrl) : null
       const shouldUseTranscode = Boolean(options?.useTranscode && transcodeUrl)
       const finalStreamUrl = shouldUseTranscode && transcodeUrl ? transcodeUrl : streamUrl
@@ -1810,6 +1795,7 @@ export function ContentDetailPage() {
       setWatchHistoryId(null) // Reset history ID
       setStartTime(0) // Reset start time
       lastProgressUpdateRef.current = 0 // Reset progress throttle
+      watchTrackingStartedRef.current = false
 
       // Save as last played stream
       if (stream.id) {
@@ -1819,41 +1805,9 @@ export function ContentDetailPage() {
         setLastPlayedStreamId(streamIdStr)
       }
 
-      // Track the watch action and get history entry for resume
-      if (item) {
-        try {
-          const historyItem = await trackAction.mutateAsync({
-            media_id: mediaId,
-            title: item.title,
-            catalog_type: catalogType === 'series' ? 'series' : catalogType === 'tv' ? 'tv' : 'movie',
-            season: selectedSeason,
-            episode: selectedEpisode,
-            action: 'watch',
-            stream_info: {
-              id: stream.id,
-              info_hash: stream.info_hash,
-              name: stream.name,
-              quality: stream.quality,
-              size: stream.size,
-              source: stream.source,
-            },
-          })
-
-          // Store history ID for progress updates
-          setWatchHistoryId(historyItem.id)
-          // Resume from last position if available
-          if (historyItem.progress > 0) {
-            setStartTime(historyItem.progress)
-          }
-        } catch (err) {
-          console.error('Failed to track watch action:', err)
-          // Still open player even if tracking fails
-        }
-      }
-
       setPlayerOpen(true)
     },
-    [item, mediaId, catalogType, selectedSeason, selectedEpisode, trackAction, getLastPlayedKey],
+    [getLastPlayedKey],
   )
 
   const handleSwitchToTranscode = useCallback(() => {
@@ -1866,6 +1820,37 @@ export function ContentDetailPage() {
   // Throttled progress update handler (every 10 seconds)
   const handleTimeUpdate = useCallback(
     (currentTime: number, duration: number) => {
+      if (currentTime > 0 && !watchHistoryId && !watchTrackingStartedRef.current && playerStream && item) {
+        watchTrackingStartedRef.current = true
+        void trackAction
+          .mutateAsync({
+            media_id: mediaId,
+            title: item.title,
+            catalog_type: catalogType === 'series' ? 'series' : catalogType === 'tv' ? 'tv' : 'movie',
+            season: selectedSeason,
+            episode: selectedEpisode,
+            action: 'watch',
+            stream_info: {
+              id: playerStream.id,
+              info_hash: playerStream.info_hash,
+              name: playerStream.name,
+              quality: playerStream.quality,
+              size: playerStream.size,
+              source: playerStream.source,
+            },
+          })
+          .then((historyItem) => {
+            setWatchHistoryId(historyItem.id)
+            if (historyItem.progress > 0) {
+              setStartTime(historyItem.progress)
+            }
+          })
+          .catch((err) => {
+            watchTrackingStartedRef.current = false
+            console.error('Failed to track watch action:', err)
+          })
+      }
+
       const now = Date.now()
       const timeSinceLastUpdate = now - lastProgressUpdateRef.current
 
@@ -1883,7 +1868,17 @@ export function ContentDetailPage() {
         })
       }
     },
-    [watchHistoryId, updateProgress],
+    [
+      watchHistoryId,
+      playerStream,
+      item,
+      trackAction,
+      mediaId,
+      catalogType,
+      selectedSeason,
+      selectedEpisode,
+      updateProgress,
+    ],
   )
 
   // Save final progress when player closes and clear player state to fully unmount

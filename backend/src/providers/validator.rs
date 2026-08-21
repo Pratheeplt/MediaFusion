@@ -114,17 +114,8 @@ async fn validate_one(
                 Some(t) => t,
                 None => return ValidationResult::error("Premiumize token is missing"),
             };
-            match http
-                .get("https://www.premiumize.me/api/account/info")
-                .query(&[("apikey", token)])
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => ValidationResult::success(),
-                Ok(r) => ValidationResult::error(format!(
-                    "Failed to validate Premiumize credentials (HTTP {})",
-                    r.status()
-                )),
+            match crate::providers::torrents::premiumize::validate_credentials(http, token).await {
+                Ok(()) => ValidationResult::success(),
                 Err(e) => ValidationResult::error(format!(
                     "Failed to validate Premiumize credentials: {e}"
                 )),

@@ -6,11 +6,14 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use serde_json::Value;
 
-use crate::providers::{
-    ProviderError,
-    file_selection::select_debrid_file_index,
-    response_json,
-    torrents::transport::{MediaFlowForward, append_query, encode_form_body},
+use crate::{
+    parser::episode_detector::is_video_file,
+    providers::{
+        ProviderError,
+        file_selection::select_debrid_file_index,
+        response_json,
+        torrents::transport::{MediaFlowForward, append_query, encode_form_body},
+    },
 };
 
 const BASE_URL: &str = "https://www.premiumize.me/api";
@@ -22,6 +25,12 @@ enum TokenKind {
     ApiKey(String),
 }
 
+/// Encode an OAuth access token in the format stored in provider configuration.
+pub fn encode_oauth_token(access_token: &str) -> String {
+    let payload = serde_json::json!({"access_token": access_token});
+    B64.encode(payload.to_string().as_bytes())
+}
+
 fn decode_token(token: &str) -> TokenKind {
     if let Ok(bytes) = B64.decode(token)
         && let Ok(s) = std::str::from_utf8(&bytes)
@@ -31,6 +40,16 @@ fn decode_token(token: &str) -> TokenKind {
         return TokenKind::Bearer(at.to_string());
     }
     TokenKind::ApiKey(token.to_string())
+}
+
+/// Validate either a private API key or MediaFusion's encoded OAuth bearer token.
+pub async fn validate_credentials(
+    http: &reqwest::Client,
+    token: &str,
+) -> Result<(), ProviderError> {
+    let kind = decode_token(token);
+    pm_get(http, &kind, "/account/info", &[], None).await?;
+    Ok(())
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -319,7 +338,23 @@ fn select_from_directdl_content(
     season: Option<i32>,
     episode: Option<i32>,
 ) -> Option<String> {
-    let files: Vec<(String, i64)> = content
+    let video_entries: Vec<&Value> = content
+        .iter()
+        .filter(|entry| {
+            let has_link = entry
+                .get("link")
+                .or_else(|| entry.get("stream_link"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|link| !link.is_empty());
+            let is_video = entry
+                .get("path")
+                .and_then(|v| v.as_str())
+                .is_some_and(is_video_file);
+            has_link && is_video
+        })
+        .collect();
+
+    let files: Vec<(String, i64)> = video_entries
         .iter()
         .map(|f| {
             let path = f
@@ -337,10 +372,10 @@ fn select_from_directdl_content(
     }
 
     let idx = select_video_file(&files, release_name, filename, file_index, season, episode);
-    let entry = &content[idx];
+    let entry = video_entries[idx];
     entry
-        .get("stream_link")
-        .or_else(|| entry.get("link"))
+        .get("link")
+        .or_else(|| entry.get("stream_link"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
 }
@@ -552,26 +587,57 @@ pub async fn get_video_url(
     let release_name = torrent_name.unwrap_or("");
 
     // Check instant availability
-    let cached = check_cache(http, &kind, info_hash, forward).await?;
+    let cached = match check_cache(http, &kind, info_hash, forward).await {
+        Ok(cached) => cached,
+        Err(error) => {
+            tracing::warn!(
+                info_hash,
+                error = %error,
+                "Premiumize cache check failed; falling back to transfer"
+            );
+            false
+        }
+    };
 
     if cached {
-        let body = direct_download(http, &kind, &magnet, forward).await?;
-        if let Some(content) = body.get("content").and_then(|v| v.as_array())
-            && let Some(url) = select_from_directdl_content(
-                content,
-                release_name,
-                filename,
-                file_index,
-                season,
-                episode,
-            )
-        {
-            return Ok(url);
+        match direct_download(http, &kind, &magnet, forward).await {
+            Ok(body) => {
+                if let Some(content) = body.get("content").and_then(|v| v.as_array()) {
+                    if let Some(url) = select_from_directdl_content(
+                        content,
+                        release_name,
+                        filename,
+                        file_index,
+                        season,
+                        episode,
+                    ) {
+                        return Ok(url);
+                    }
+                    if !content.is_empty() {
+                        tracing::warn!(
+                            info_hash,
+                            file_count = content.len(),
+                            "Premiumize direct download contained no playable video files"
+                        );
+                        return Err(ProviderError::api(
+                            "Premiumize returned files for this torrent, but none are playable videos",
+                            "no_matching_file.mp4",
+                        ));
+                    }
+                }
+                tracing::warn!(
+                    info_hash,
+                    "Premiumize cache hit returned empty direct-download content; falling back to transfer"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    info_hash,
+                    error = %error,
+                    "Premiumize direct download failed after cache hit; falling back to transfer"
+                );
+            }
         }
-        return Err(ProviderError::api(
-            "No video file found in Premiumize direct download",
-            "torrent_not_downloaded.mp4",
-        ));
     }
 
     // Not cached — use transfer flow
@@ -809,4 +875,53 @@ pub async fn check_cached(http: &reqwest::Client, token: &str, hashes: &[String]
     }
 
     cached
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{TokenKind, decode_token, encode_oauth_token, select_from_directdl_content};
+
+    #[test]
+    fn oauth_token_storage_format_round_trips() {
+        let encoded = encode_oauth_token("premiumize-access-token");
+        match decode_token(&encoded) {
+            TokenKind::Bearer(token) => assert_eq!(token, "premiumize-access-token"),
+            TokenKind::ApiKey(_) => panic!("encoded OAuth token was treated as an API key"),
+        }
+    }
+
+    #[test]
+    fn direct_download_selects_only_linked_video_files() {
+        let content = vec![
+            json!({"path": "Release/readme.txt", "size": 500, "link": "https://cdn/readme"}),
+            json!({"path": "Release/movie.mkv", "size": 1_000_000, "link": "https://cdn/movie"}),
+            json!({"path": "Release/sample.mkv", "size": 10_000}),
+        ];
+
+        let selected = select_from_directdl_content(&content, "Release", None, None, None, None);
+
+        assert_eq!(selected.as_deref(), Some("https://cdn/movie"));
+    }
+
+    #[test]
+    fn direct_download_returns_none_for_empty_cache_result() {
+        let selected = select_from_directdl_content(&[], "Release", None, None, None, None);
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn direct_download_rejects_linked_executables() {
+        let content = vec![json!({
+            "path": "Movie.1080p.WEB.exe",
+            "size": 1_000_000,
+            "link": "https://cdn/not-a-video"
+        })];
+
+        let selected =
+            select_from_directdl_content(&content, "Movie.1080p.WEB", None, None, None, None);
+
+        assert!(selected.is_none());
+    }
 }
