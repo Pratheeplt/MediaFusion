@@ -619,9 +619,8 @@ pub async fn get_video_url(
                             file_count = content.len(),
                             "Premiumize direct download contained no playable video files"
                         );
-                        return Err(ProviderError::api(
+                        return Err(ProviderError::confirmed_no_playable_files(
                             "Premiumize returned files for this torrent, but none are playable videos",
-                            "no_matching_file.mp4",
                         ));
                     }
                 }

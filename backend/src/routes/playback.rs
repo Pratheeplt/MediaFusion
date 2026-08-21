@@ -417,6 +417,23 @@ async fn resolve(
         }
     };
 
+    if result
+        .as_ref()
+        .is_err_and(providers::ProviderError::should_quarantine_hash)
+        && providers::torrents::metadata_update::quarantine_stream(
+            &state.pool,
+            Some(&state.redis),
+            info_hash,
+        )
+        .await
+    {
+        tracing::warn!(
+            provider = %provider_name,
+            hash = %info_hash,
+            "quarantined torrent after provider confirmed it contains no playable video files"
+        );
+    }
+
     tracing::info!(
         provider = %provider_name,
         hash = %info_hash,
@@ -965,26 +982,6 @@ fn playback_cache_key(
     format!("playback_url:{hash}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::playback_cache_key;
-
-    #[test]
-    fn playback_cache_key_varies_by_provider() {
-        let base = playback_cache_key("U-abc", "realdebrid", "deadbeef", None, None, None);
-        let torbox = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
-        assert_ne!(base, torbox);
-    }
-
-    #[test]
-    fn playback_cache_key_varies_by_filename() {
-        let no_name = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
-        let named =
-            playback_cache_key("U-abc", "torbox", "deadbeef", None, None, Some("movie.mkv"));
-        assert_ne!(no_name, named);
-    }
-}
-
 async fn try_cached_playback_url(
     state: &AppState,
     cache_key: &str,
@@ -1082,4 +1079,24 @@ pub(crate) fn playback_redirect(method: Method, url: String) -> Response {
     builder
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::playback_cache_key;
+
+    #[test]
+    fn playback_cache_key_varies_by_provider() {
+        let base = playback_cache_key("U-abc", "realdebrid", "deadbeef", None, None, None);
+        let torbox = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
+        assert_ne!(base, torbox);
+    }
+
+    #[test]
+    fn playback_cache_key_varies_by_filename() {
+        let no_name = playback_cache_key("U-abc", "torbox", "deadbeef", None, None, None);
+        let named =
+            playback_cache_key("U-abc", "torbox", "deadbeef", None, None, Some("movie.mkv"));
+        assert_ne!(no_name, named);
+    }
 }

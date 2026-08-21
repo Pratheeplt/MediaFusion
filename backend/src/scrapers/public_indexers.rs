@@ -7,17 +7,22 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use futures::{StreamExt, stream};
 use reqwest::Client;
 use scraper::{Html, Selector};
 
 use crate::{
-    parser,
+    parser::{
+        self,
+        episode_detector::{detect_episode, is_video_file},
+    },
     scrapers::{
-        ScrapedStream, SearchMeta, fetcher,
+        ScrapedStream, SearchMeta, StreamFile, fetcher,
         prowlarr::build_series_files,
         public_indexer_registry::{HandlerType, IndexerDef, get_indexers_for_media},
         rss::parse_rss_xml,
         source_health::{self, HealthGateConfig},
+        torrent_metadata,
     },
     state::KeywordFilterCache,
 };
@@ -457,6 +462,9 @@ pub struct RowData {
     pub title: String,
     pub magnet_href: Option<String>,
     pub detail_href: Option<String>,
+    /// Direct `.torrent` metadata link when exposed by the listing. LimeTorrents
+    /// provides this separately from its human-facing detail link.
+    pub torrent_href: Option<String>,
     pub size_str: Option<String>,
     pub seeder_str: Option<String>,
 }
@@ -480,6 +488,9 @@ fn extract_row_data(doc: &Html, indexer: &IndexerDef) -> Vec<RowData> {
                 title,
                 magnet_href: select_text_in_element(row, indexer.magnet_selectors),
                 detail_href: select_text_in_element(row, indexer.detail_selectors),
+                torrent_href: (indexer.key == "limetorrents")
+                    .then(|| select_text_in_element(row, &["a.csprite_dl14::attr(href)"]))
+                    .flatten(),
                 size_str: select_text_in_element(row, indexer.size_selectors),
                 seeder_str: select_text_in_element(row, indexer.seeder_selectors),
             })
@@ -548,27 +559,35 @@ async fn scrape_html(
                     data
                 }; // `doc` dropped here — future is now Send again
 
-                for data in row_data {
-                    if results.len() >= 50 {
-                        break 'outer;
-                    }
-                    if let Some(stream) = process_row_data(
-                        client,
-                        indexer,
-                        meta,
-                        media_type,
-                        season,
-                        episode,
-                        data,
-                        &base_url,
-                        sim_min,
-                        trawl_url,
-                        keyword_filters,
-                    )
-                    .await
-                        && seen.insert(stream.info_hash.clone())
-                    {
+                // Direct metainfo inspection may involve a remote `.torrent`
+                // download. Bound concurrency so one slow mirror does not make
+                // every plausible result wait serially.
+                let processed = stream::iter(row_data)
+                    .map(|data| {
+                        process_row_data(
+                            client,
+                            indexer,
+                            meta,
+                            media_type,
+                            season,
+                            episode,
+                            data,
+                            &base_url,
+                            sim_min,
+                            trawl_url,
+                            keyword_filters,
+                        )
+                    })
+                    .buffer_unordered(8)
+                    .collect::<Vec<_>>()
+                    .await;
+
+                for stream in processed.into_iter().flatten() {
+                    if seen.insert(stream.info_hash.clone()) {
                         results.push(stream);
+                        if results.len() >= 50 {
+                            break 'outer;
+                        }
                     }
                 }
                 if !results.is_empty() {
@@ -599,32 +618,97 @@ async fn process_row_data(
     }
     let row_title = data.title.clone();
 
+    // Reject obviously unrelated rows before following detail or metainfo links.
+    // This also keeps LimeTorrents metadata inspection bounded to plausible hits.
+    let row_parsed = parser::parse_title(&row_title);
+    let row_ratio = parser::similarity_ratio(
+        row_parsed.title.as_deref().unwrap_or(&row_title),
+        &meta.title,
+    );
+    if row_ratio < sim_min {
+        return None;
+    }
+    if media_type == "movie"
+        && let (Some(py), Some(my)) = (row_parsed.year, meta.year)
+        && py != my
+    {
+        return None;
+    }
+
+    // Prefer a direct `.torrent` link when the indexer exposes one. Unlike a
+    // magnet display name, metainfo contains the real internal filenames, so
+    // executable-only/fake releases can be rejected before they reach the DB.
+    let parsed_torrent = if let Some(href) = data.torrent_href.as_deref() {
+        let url = resolve_url(base_url, href)?;
+        torrent_metadata::download_torrent_bytes(client, &url, Duration::from_secs(8))
+            .await
+            .and_then(|bytes| torrent_metadata::parse_torrent_bytes(&bytes))
+    } else {
+        None
+    };
+
+    if let Some(torrent) = parsed_torrent.as_ref() {
+        let blocked_file = torrent
+            .files
+            .iter()
+            .find(|file| keyword_filters.matches_blocked_keyword(&file.path));
+        if let Some(file) = blocked_file {
+            tracing::warn!(
+                indexer = indexer.key,
+                info_hash = %torrent.info_hash,
+                filename = %file.path,
+                "public indexer torrent metadata matched a blocked filename"
+            );
+            return None;
+        }
+        if !torrent.files.iter().any(|file| is_video_file(&file.path)) {
+            tracing::warn!(
+                indexer = indexer.key,
+                info_hash = %torrent.info_hash,
+                file_count = torrent.files.len(),
+                "public indexer torrent metadata contained no playable video files"
+            );
+            return None;
+        }
+    }
+
     // Try direct magnet from listing row, otherwise follow the detail page.
-    let (info_hash, magnet_url) = match data
-        .magnet_href
-        .as_deref()
-        .filter(|m| m.starts_with("magnet:"))
-        .and_then(|magnet| {
-            parser::extract_info_hash(magnet).map(|h| (h.to_lowercase(), magnet.to_string()))
-        }) {
-        Some(found) => found,
-        None => {
-            let detail_href = data.detail_href?;
-            if detail_href.len() > indexer.max_detail_url_length {
-                return None;
+    let (info_hash, magnet_url) = if let Some(torrent) = parsed_torrent.as_ref() {
+        (
+            torrent.info_hash.clone(),
+            format!(
+                "magnet:?xt=urn:btih:{}&dn={}",
+                torrent.info_hash,
+                urlencoding::encode(&torrent.name)
+            ),
+        )
+    } else {
+        match data
+            .magnet_href
+            .as_deref()
+            .filter(|m| m.starts_with("magnet:"))
+            .and_then(|magnet| {
+                parser::extract_info_hash(magnet).map(|h| (h.to_lowercase(), magnet.to_string()))
+            }) {
+            Some(found) => found,
+            None => {
+                let detail_href = data.detail_href?;
+                if detail_href.len() > indexer.max_detail_url_length {
+                    return None;
+                }
+                let detail_url = resolve_url(base_url, &detail_href)?;
+                let dr = fetcher::fetch_for_indexer(
+                    client,
+                    trawl_url,
+                    &detail_url,
+                    indexer.solve_cloudflare,
+                    indexer.http_fallback,
+                )
+                .await?;
+                let magnet = find_magnet_in_html(&dr.html)?;
+                let hash = parser::extract_info_hash(&magnet)?.to_lowercase();
+                (hash, magnet)
             }
-            let detail_url = resolve_url(base_url, &detail_href)?;
-            let dr = fetcher::fetch_for_indexer(
-                client,
-                trawl_url,
-                &detail_url,
-                indexer.solve_cloudflare,
-                indexer.http_fallback,
-            )
-            .await?;
-            let magnet = find_magnet_in_html(&dr.html)?;
-            let hash = parser::extract_info_hash(&magnet)?.to_lowercase();
-            (hash, magnet)
         }
     };
 
@@ -641,13 +725,41 @@ async fn process_row_data(
         return None;
     }
 
-    let size = data.size_str.as_deref().and_then(parse_size_bytes);
+    let size = parsed_torrent
+        .as_ref()
+        .map(|torrent| torrent.total_size)
+        .or_else(|| data.size_str.as_deref().and_then(parse_size_bytes));
     let seeders = data
         .seeder_str
         .as_deref()
         .and_then(|s| s.trim().parse::<i32>().ok());
 
-    let files = if media_type == "series" {
+    let files = if let Some(torrent) = parsed_torrent.as_ref() {
+        torrent
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| is_video_file(&file.path))
+            .filter_map(|(index, file)| {
+                if media_type == "series" {
+                    let detected = detect_episode(&file.path, season.unwrap_or(1))?;
+                    Some(StreamFile {
+                        file_index: index as i32,
+                        filename: file.path.clone(),
+                        season_number: detected.season,
+                        episode_number: detected.episode,
+                    })
+                } else {
+                    Some(StreamFile {
+                        file_index: index as i32,
+                        filename: file.path.clone(),
+                        season_number: 0,
+                        episode_number: 0,
+                    })
+                }
+            })
+            .collect()
+    } else if media_type == "series" {
         build_series_files(&parsed, season, episode)
     } else {
         vec![]
@@ -667,7 +779,9 @@ async fn process_row_data(
         is_cached: false,
         torrent_type: crate::db::TorrentType::Public,
         torrent_file: None,
-        announce_list: vec![],
+        announce_list: parsed_torrent
+            .map(|torrent| torrent.announce_list)
+            .unwrap_or_default(),
         uploader: None,
     })
 }

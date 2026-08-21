@@ -19,6 +19,7 @@
 .rar
 .rar
 .rtf
+.scr
 .tar
 .txt
 .wv

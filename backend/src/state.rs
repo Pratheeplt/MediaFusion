@@ -1500,7 +1500,7 @@ async fn reconcile_file_keyword_scopes(pool: &PgPool) {
 
 #[cfg(test)]
 mod keyword_filter_tests {
-    use super::KeywordFilterCache;
+    use super::{KeywordFilterCache, embedded_stream_keywords};
 
     fn test_cache() -> KeywordFilterCache {
         KeywordFilterCache {
@@ -1527,6 +1527,11 @@ mod keyword_filter_tests {
             "clean display name",
             Some("FTVMilfs 25 04 01 Avalon Mira Her Mesmerizing Bounce XXX 2160p MP4"),
         ));
+    }
+
+    #[test]
+    fn bundled_stream_filter_blocks_windows_screensaver_executables() {
+        assert!(embedded_stream_keywords().iter().any(|kw| kw == ".scr"));
     }
 
     #[test]

@@ -567,5 +567,12 @@ async fn upsert_torrent_files_by_hash_enriches_existing_torrent() {
             .await
             .expect("count");
     assert_eq!(file_count, 1);
+    let declared_file_count: i32 =
+        sqlx::query_scalar("SELECT file_count FROM torrent_stream WHERE stream_id = $1")
+            .bind(result.stream_id().0)
+            .fetch_one(pool)
+            .await
+            .expect("declared file count");
+    assert_eq!(declared_file_count, 1);
     cleanup.finish().await;
 }

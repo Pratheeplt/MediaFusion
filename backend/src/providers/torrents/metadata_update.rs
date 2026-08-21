@@ -6,7 +6,7 @@
 ///
 /// Mirrors Python `update_torrent_streams_metadata` including is_blocked and
 /// annotation request paths when episode parsing fails.
-use fred::prelude::{Expiration, KeysInterface};
+use fred::prelude::*;
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
 
@@ -52,16 +52,84 @@ async fn annotation_lock_acquired(redis: &fred::clients::Client, info_hash: &str
         .is_ok()
 }
 
-async fn block_stream(pool: &PgPool, info_hash: &str) {
-    if let Err(e) = sqlx::query(
-        "UPDATE stream SET is_blocked = true, updated_at = NOW() \
+pub async fn quarantine_stream(
+    pool: &PgPool,
+    redis: Option<&fred::clients::Client>,
+    info_hash: &str,
+) -> bool {
+    let updated = match sqlx::query(
+        "UPDATE stream SET is_blocked = true, is_active = false, updated_at = NOW() \
          FROM torrent_stream ts WHERE ts.stream_id = stream.id AND ts.info_hash = $1",
     )
     .bind(info_hash)
     .execute(pool)
     .await
     {
-        warn!("metadata_update: block_stream {info_hash}: {e}");
+        Ok(result) => result.rows_affected() > 0,
+        Err(e) => {
+            warn!("metadata_update: quarantine_stream {info_hash}: {e}");
+            false
+        }
+    };
+    if updated && let Some(redis) = redis {
+        invalidate_stream_caches(pool, redis, info_hash).await;
+    }
+    updated
+}
+
+async fn invalidate_stream_caches(pool: &PgPool, redis: &fred::clients::Client, info_hash: &str) {
+    let media_ids: Vec<i32> = sqlx::query_scalar(
+        "SELECT DISTINCT sml.media_id FROM stream_media_link sml \
+         JOIN torrent_stream ts ON ts.stream_id = sml.stream_id \
+         WHERE ts.info_hash = $1",
+    )
+    .bind(info_hash)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for media_id in media_ids {
+        for pattern in [
+            format!("stream_data:movie:{media_id}:*"),
+            format!("stream_data:series:{media_id}:*"),
+        ] {
+            let mut cursor = "0".to_string();
+            loop {
+                let page: Result<fred::types::Value, _> = redis
+                    .scan_page(cursor.clone(), pattern.clone(), Some(250), None)
+                    .await;
+                let Ok(fred::types::Value::Array(parts)) = page else {
+                    break;
+                };
+                if parts.len() != 2 {
+                    break;
+                }
+                cursor = redis_value_string(&parts[0]);
+                let keys: Vec<String> = match &parts[1] {
+                    fred::types::Value::Array(values) => values
+                        .iter()
+                        .map(redis_value_string)
+                        .filter(|key| !key.is_empty())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !keys.is_empty() {
+                    let _: Result<i64, _> = redis.del(keys).await;
+                }
+                if cursor == "0" {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn redis_value_string(value: &fred::types::Value) -> String {
+    match value {
+        fred::types::Value::String(value) => value.to_string(),
+        fred::types::Value::Bytes(value) => String::from_utf8_lossy(value).into_owned(),
+        fred::types::Value::Integer(value) => value.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -131,7 +199,7 @@ pub async fn update_metadata(
 
     if video_files.is_empty() {
         debug!("metadata_update: no video files for {info_hash} — blocking");
-        block_stream(pool, info_hash).await;
+        quarantine_stream(pool, redis, info_hash).await;
         return;
     }
 

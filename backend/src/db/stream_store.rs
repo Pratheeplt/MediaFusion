@@ -100,6 +100,9 @@ pub async fn store_torrent_stream(
 
     let stream_id = insert_base_stream(pool, &stream.base, StreamType::Torrent).await?;
 
+    // Keep unresolved magnets visible as single-file candidates so a debrid
+    // provider can inspect and enrich them on first playback. Once metainfo is
+    // available, store the actual playable-file count.
     let file_count = if stream.files.is_empty() {
         1
     } else {
@@ -614,10 +617,13 @@ pub async fn upsert_torrent_files_by_hash(
     }
 
     sqlx::query(
-        "UPDATE torrent_stream SET total_size = GREATEST(total_size, $2), updated_at = NOW() WHERE stream_id = $1",
+        "UPDATE torrent_stream \
+         SET total_size = GREATEST(total_size, $2), file_count = $3, updated_at = NOW() \
+         WHERE stream_id = $1",
     )
     .bind(stream_id.0)
     .bind(total_size)
+    .bind(files.len() as i32)
     .execute(&mut *txn)
     .await?;
 

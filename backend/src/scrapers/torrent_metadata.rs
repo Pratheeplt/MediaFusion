@@ -17,7 +17,16 @@ pub struct ParsedTorrent {
     pub name: String,
     pub total_size: i64,
     pub announce_list: Vec<String>,
+    /// Physical files declared by the torrent metainfo. Single-file torrents
+    /// are represented by one entry using the torrent name.
+    pub files: Vec<ParsedTorrentFile>,
     pub raw_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedTorrentFile {
+    pub path: String,
+    pub size: i64,
 }
 
 /// Providers allowed to surface non-public torrent streams in the catalog.
@@ -186,11 +195,26 @@ pub fn parse_torrent_bytes(bytes: &[u8]) -> Option<ParsedTorrent> {
         }
     }
 
+    let files = match &torrent.files {
+        Some(files) => files
+            .iter()
+            .map(|file| ParsedTorrentFile {
+                path: file.path.to_string_lossy().into_owned(),
+                size: file.length,
+            })
+            .collect(),
+        None => vec![ParsedTorrentFile {
+            path: torrent.name.clone(),
+            size: torrent.length,
+        }],
+    };
+
     Some(ParsedTorrent {
         info_hash: info_hash.to_lowercase(),
         name: torrent.name.clone(),
         total_size: torrent.length,
         announce_list,
+        files,
         raw_bytes: bytes.to_vec(),
     })
 }
@@ -224,6 +248,22 @@ pub fn torrent_type_from_json_value(t: &serde_json::Value) -> TorrentType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_single_file_torrent_exposes_physical_filename() {
+        let mut bytes =
+            b"d4:infod6:lengthi123e4:name8:fake.scr12:piece lengthi16384e6:pieces20:".to_vec();
+        // Non-UTF-8 bytes keep the bencode decoder's `pieces` value typed as
+        // a byte string instead of a textual string.
+        bytes.extend_from_slice(&[0xff; 20]);
+        bytes.extend_from_slice(b"ee");
+
+        Torrent::read_from_bytes(&bytes).expect("valid torrent metainfo fixture");
+        let parsed = parse_torrent_bytes(&bytes).expect("parsed torrent metainfo");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].path, "fake.scr");
+        assert_eq!(parsed.files[0].size, 123);
+    }
 
     #[test]
     fn resolve_download_url_prefers_download_for_private() {

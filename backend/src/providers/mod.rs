@@ -123,6 +123,9 @@ pub enum ProviderError {
         message: String,
         /// Filename under `/static/exceptions/` to redirect to on error.
         video_file: &'static str,
+        /// The provider returned a definitive, non-empty torrent file list
+        /// containing no playable videos. The hash is safe to quarantine.
+        quarantine_hash: bool,
     },
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -137,7 +140,26 @@ impl ProviderError {
         Self::Api {
             message: message.into(),
             video_file,
+            quarantine_hash: false,
         }
+    }
+
+    pub fn confirmed_no_playable_files(message: impl Into<String>) -> Self {
+        Self::Api {
+            message: message.into(),
+            video_file: "no_matching_file.mp4",
+            quarantine_hash: true,
+        }
+    }
+
+    pub fn should_quarantine_hash(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                quarantine_hash: true,
+                ..
+            }
+        )
     }
 
     /// The error video filename to redirect to (default: api_error.mp4).
@@ -194,5 +216,22 @@ impl ProviderError {
         } else {
             tracing::debug!("{message}: {self}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderError;
+
+    #[test]
+    fn only_confirmed_no_video_error_requests_hash_quarantine() {
+        assert!(
+            ProviderError::confirmed_no_playable_files("executable only").should_quarantine_hash()
+        );
+        assert!(
+            !ProviderError::api("no episode match", "no_matching_file.mp4")
+                .should_quarantine_hash()
+        );
+        assert!(!ProviderError::api("temporary outage", "api_error.mp4").should_quarantine_hash());
     }
 }
