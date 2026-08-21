@@ -565,7 +565,7 @@ pub async fn test_torznab_endpoint(
             if error_code.is_some() || error_desc.is_some() {
                 return Json(serde_json::json!({
                     "success": false,
-                    "message": format!("Invalid response (not valid Torznab XML)"),
+                    "message": "Invalid response (not valid Torznab XML)",
                 }))
                 .into_response();
             }

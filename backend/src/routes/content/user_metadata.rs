@@ -70,7 +70,7 @@ fn validate_token(headers: &HeaderMap, secret_key: &str) -> Option<i32> {
     data["sub"].as_str()?.parse().ok()
 }
 
-async fn require_mod_or_admin(pool: &sqlx::PgPool, user_id: i32) -> Result<(), Response> {
+async fn require_mod_or_admin(pool: &sqlx::PgPool, user_id: i32) -> Result<(), Box<Response>> {
     let role: Option<UserRole> = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(pool)
@@ -78,11 +78,13 @@ async fn require_mod_or_admin(pool: &sqlx::PgPool, user_id: i32) -> Result<(), R
         .unwrap_or(None);
     match role {
         Some(UserRole::Moderator) | Some(UserRole::Admin) => Ok(()),
-        _ => Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"detail": "Moderator or admin role required"})),
-        )
-            .into_response()),
+        _ => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"detail": "Moderator or admin role required"})),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -1481,7 +1483,7 @@ pub async fn admin_delete_episode(
     };
 
     if let Err(resp) = require_mod_or_admin(&state.pool, user_id).await {
-        return resp;
+        return *resp;
     }
 
     let media_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media WHERE id = $1)")
@@ -1717,7 +1719,7 @@ pub async fn admin_delete_season(
     };
 
     if let Err(resp) = require_mod_or_admin(&state.pool, user_id).await {
-        return resp;
+        return *resp;
     }
 
     let media_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media WHERE id = $1)")

@@ -163,7 +163,7 @@ async fn sign_in_with_hash(
     phone: &str,
     phone_code_hash: &str,
     code: &str,
-) -> Result<grammers_client::peer::User, SignInError> {
+) -> Result<grammers_client::peer::User, Box<SignInError>> {
     match client
         .invoke(&tl::functions::auth::SignIn {
             phone_number: phone.to_string(),
@@ -176,17 +176,21 @@ async fn sign_in_with_hash(
         Ok(tl::enums::auth::Authorization::Authorization(x)) => {
             Ok(grammers_client::peer::User::from_raw(client, x.user))
         }
-        Ok(tl::enums::auth::Authorization::SignUpRequired(_)) => Err(SignInError::SignUpRequired),
+        Ok(tl::enums::auth::Authorization::SignUpRequired(_)) => {
+            Err(Box::new(SignInError::SignUpRequired))
+        }
         Err(err) if err.is("SESSION_PASSWORD_NEEDED") => {
             let password: tl::types::account::Password =
                 match client.invoke(&tl::functions::account::GetPassword {}).await {
                     Ok(value) => value.into(),
-                    Err(error) => return Err(SignInError::Other(error)),
+                    Err(error) => return Err(Box::new(SignInError::Other(error))),
                 };
-            Err(SignInError::PasswordRequired(PasswordToken::new(password)))
+            Err(Box::new(SignInError::PasswordRequired(PasswordToken::new(
+                password,
+            ))))
         }
-        Err(err) if err.is("PHONE_CODE_*") => Err(SignInError::InvalidCode),
-        Err(error) => Err(SignInError::Other(error)),
+        Err(err) if err.is("PHONE_CODE_*") => Err(Box::new(SignInError::InvalidCode)),
+        Err(error) => Err(Box::new(SignInError::Other(error))),
     }
 }
 
@@ -423,6 +427,7 @@ pub async fn verify_code(
         code,
     )
     .await
+    .map_err(|error| *error)
     {
         Ok(user) => {
             pending.clear(user_id).await;

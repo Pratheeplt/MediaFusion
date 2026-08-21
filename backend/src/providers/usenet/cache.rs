@@ -14,7 +14,13 @@ use sha2::{Digest, Sha256};
 const KEY_PREFIX: &str = "usenet_provider_";
 pub const TTL: i64 = 3600;
 
-pub fn cache_key(secret: &str, provider_name: &str, nzb_guid: &str, season: i32, episode: i32) -> String {
+pub fn cache_key(
+    secret: &str,
+    provider_name: &str,
+    nzb_guid: &str,
+    season: i32,
+    episode: i32,
+) -> String {
     let provider = provider_name.to_lowercase();
     let raw = format!("{secret}_{provider}_{nzb_guid}_{season}_{episode}");
     let hex: String = Sha256::digest(raw.as_bytes())

@@ -88,35 +88,43 @@ async fn require_stream_owner(
     pool: &sqlx::PgPool,
     stream_id: i32,
     user_id: i32,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let uploader = match stream_uploader_user_id(pool, stream_id).await {
         Ok(v) => v,
         Err(()) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database error"})),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Database error"})),
+                )
+                    .into_response(),
+            ));
         }
     };
 
     match uploader {
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Stream not found"})),
-        )
-            .into_response()),
-        Some(None) => Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"detail": "You do not own this stream"})),
-        )
-            .into_response()),
+        None => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Stream not found"})),
+            )
+                .into_response(),
+        )),
+        Some(None) => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"detail": "You do not own this stream"})),
+            )
+                .into_response(),
+        )),
         Some(Some(owner_id)) if owner_id == user_id => Ok(()),
-        Some(Some(_)) => Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"detail": "You do not own this stream"})),
-        )
-            .into_response()),
+        Some(Some(_)) => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"detail": "You do not own this stream"})),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -393,7 +401,7 @@ pub async fn update_my_stream(
     };
 
     if let Err(resp) = require_stream_owner(&state.pool, stream_id, user_id).await {
-        return resp;
+        return *resp;
     }
 
     let mut updates: Vec<(&str, String)> = Vec::new();
@@ -484,7 +492,7 @@ pub async fn block_my_stream(
     };
 
     if let Err(resp) = require_stream_owner(&state.pool, stream_id, user_id).await {
-        return resp;
+        return *resp;
     }
 
     if let Err(e) = sqlx::query(

@@ -28,10 +28,10 @@ async fn admin_auth(
     headers: &HeaderMap,
     pool: &sqlx::PgPool,
     secret: &str,
-) -> Result<i32, Response> {
+) -> Result<i32, Box<Response>> {
     auth_guard::require_active_role(pool, headers, secret, &["admin"])
         .await
-        .map_err(|failure| auth_guard::auth_failure_response(failure).into_response())
+        .map_err(|failure| Box::new(auth_guard::auth_failure_response(failure).into_response()))
 }
 
 // ─── Row / Response types ─────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ pub async fn list_users(
 ) -> Response {
     let _admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Validate role filter
@@ -272,7 +272,7 @@ pub async fn get_user(
 ) -> Response {
     let _admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let row = sqlx::query_as::<_, UserRow>(
@@ -311,7 +311,7 @@ pub async fn update_user(
 ) -> Response {
     let _admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Confirm user exists
@@ -434,7 +434,7 @@ pub async fn update_user_role(
 ) -> Response {
     let admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Validate role value
@@ -516,7 +516,7 @@ pub async fn delete_user(
 ) -> Response {
     let admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if user_id == admin_id {
@@ -579,7 +579,7 @@ pub async fn send_upload_warning(
 ) -> Response {
     let _admin_id = match admin_auth(&headers, &state.pool, &state.config.secret_key_raw).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Fetch user email

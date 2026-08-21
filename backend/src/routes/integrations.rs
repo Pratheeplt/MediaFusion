@@ -1007,14 +1007,14 @@ pub async fn get_telegram_status(State(state): State<Arc<AppState>>) -> Response
 async fn load_profile_tgc(
     state: &AppState,
     user_id: i32,
-) -> Result<(serde_json::Value, serde_json::Value), Response> {
+) -> Result<(serde_json::Value, serde_json::Value), Box<Response>> {
     let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
         "SELECT config FROM user_profiles WHERE user_id = $1 AND is_default = true LIMIT 1",
     )
     .bind(user_id)
     .fetch_optional(&state.pool_ro)
     .await
-    .map_err(|e| db_error("load_profile_tgc", &e))?;
+    .map_err(|e| Box::new(db_error("load_profile_tgc", &e)))?;
 
     let full_config = row
         .and_then(|(v,)| v)
@@ -1088,7 +1088,7 @@ pub async fn get_telegram_config(
 
     let (tgc, _) = match load_profile_tgc(&state, user_id).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
 
     // Fetch telegram_user_id and linked_at from users table
@@ -1141,7 +1141,7 @@ pub async fn update_telegram_config(
 
     let (mut tgc, mut full_config) = match load_profile_tgc(&state, user_id).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
 
     // Apply updates from body
